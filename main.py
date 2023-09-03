@@ -1,70 +1,68 @@
-from machine import Pin
-from utime import sleep_ms
+import json
 
-windows = {
-    1: {
-        'open': Pin(2, Pin.OUT, value=1),
-        'stop': Pin(4, Pin.OUT, value=1),
-        'close': Pin(16, Pin.OUT, value=1),
-        'duration': 71
-    },
-    2: {
-        'open': Pin(19, Pin.OUT, value=1),
-        'stop': Pin(5, Pin.OUT, value=1),
-        'close': Pin(18, Pin.OUT, value=1),
-        'duration': 71
-    },
-    3: {
-        'open': Pin(21, Pin.OUT, value=1),
-        'stop': Pin(22, Pin.OUT, value=1),
-        'close': Pin(23, Pin.OUT, value=1),
-        'duration': 71
-    }
-}
+from config import WINDOW_CONFIG
+from secrets import WIFI_SSID, WIFI_PASS, MQTT_IP
+from mqtt_as import MQTTClient, config
+import uasyncio as asyncio
+
+from window import Window
+
+# Local configuration
+config['ssid'] = WIFI_SSID
+config['wifi_pw'] = WIFI_PASS
+config['server'] = MQTT_IP
+
+windows = {}
 
 
-DEBOUNCE_DELAY = 60
-WAIT_DELAY = 300
+async def messages(client):
+    async for topic, msg, retained in client.queue:
+        if topic.startswith("skylight/set"):
+            msg = json.loads(msg)
+            await windows[msg["index"]].set(msg["percentage"])
+
+        elif topic.startswith("skylight/get"):
+            msg = json.loads(msg)
+            result = {
+                "index": msg["index"],
+                "percentage": await windows[msg["index"]].percentage()
+            }
+            await client.publish('skylight/get/response', json.dumps(result), qos=0)
+
+        else:
+            print("Unknown MQTT message:", topic, msg, retained)
 
 
-def open(window):
-    for _ in range(2):
-        windows[window]['open'].off()
-        sleep_ms(DEBOUNCE_DELAY)
-        windows[window]['open'].on()
-        sleep_ms(DEBOUNCE_DELAY)
-
-    sleep_ms(WAIT_DELAY)
+async def up(client):
+    while True:
+        await client.up.wait()
+        client.up.clear()
+        await client.subscribe("skylight/+", 0)
 
 
-def close(window):
-    for _ in range(2):
-        windows[window]['close'].off()
-        sleep_ms(DEBOUNCE_DELAY)
-        windows[window]['close'].on()
-        sleep_ms(DEBOUNCE_DELAY)
+async def init():
+    for index, window in WINDOW_CONFIG.items():
+        window = Window(index, window['open'], window['close'], window['stop'])
+        windows[index] = window
 
-    sleep_ms(WAIT_DELAY)
+        await window.init()
 
 
-def stop(window):
-    for _ in range(2):
-        windows[window]['stop'].off()
-        sleep_ms(DEBOUNCE_DELAY)
-        windows[window]['stop'].on()
-        sleep_ms(DEBOUNCE_DELAY)
+async def main(client):
+    asyncio.create_task(init())
 
-    sleep_ms(WAIT_DELAY)
+    await client.connect()
+    for coroutine in (up, messages):
+        asyncio.create_task(coroutine(client))
 
-
-def init():
-    # Make sure the windows start an open cycle
-    for window in windows.keys():
-        open(window)
-
-    # Make sure the initial state is that windows are closed
-    for window in windows.keys():
-        close(window)
+    while True:
+        await asyncio.sleep(5)
 
 
-init()
+config["queue_len"] = 6
+MQTTClient.DEBUG = True
+_client = MQTTClient(config)
+try:
+    asyncio.run(main(_client))
+finally:
+    _client.close()
