@@ -4,12 +4,13 @@ from config import DEBOUNCE_DELAY, WAIT_DELAY
 
 
 class Window:
-    def __init__(self, index, open_pin, close_pin, stop_pin):
+    def __init__(self, lock, index, open_pin, close_pin, stop_pin):
         self.index = index
         self.open_pin = open_pin
         self.close_pin = close_pin
         self.stop_pin = stop_pin
         self._percentage = 0
+        self.lock = lock
 
     async def percentage(self):
         return self._percentage
@@ -35,29 +36,32 @@ class Window:
         self._percentage = 0
 
     async def open(self):
-        for _ in range(2):
-            self.open_pin.off()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
-            self.open_pin.on()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+        async with self.lock:
+            for _ in range(2):
+                self.open_pin.off()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+                self.open_pin.on()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
 
-        await uasyncio.sleep_ms(WAIT_DELAY)
+            await uasyncio.sleep_ms(WAIT_DELAY)
 
     async def close(self):
-        for _ in range(2):
-            self.close_pin.off()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
-            self.close_pin.on()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+        async with self.lock:
+            for _ in range(2):
+                self.close_pin.off()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+                self.close_pin.on()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
 
-        await uasyncio.sleep_ms(WAIT_DELAY)
+            await uasyncio.sleep_ms(WAIT_DELAY)
 
     async def stop(self):
-        for _ in range(2):
-            self.stop_pin.off()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
-            self.stop_pin.on()
-            await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+        async with self.lock:
+            for _ in range(2):
+                self.stop_pin.off()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
+                self.stop_pin.on()
+                await uasyncio.sleep_ms(DEBOUNCE_DELAY)
 
-        await uasyncio.sleep_ms(WAIT_DELAY)
+            await uasyncio.sleep_ms(WAIT_DELAY)
 

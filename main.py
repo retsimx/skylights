@@ -13,6 +13,7 @@ config['wifi_pw'] = WIFI_PASS
 config['server'] = MQTT_IP
 
 windows = {}
+window_lock = asyncio.Lock()
 
 
 async def messages(client):
@@ -42,7 +43,7 @@ async def up(client):
 
 async def init():
     for index, window in WINDOW_CONFIG.items():
-        window = Window(index, window['open'], window['close'], window['stop'])
+        window = Window(window_lock, index, window['open'], window['close'], window['stop'])
         windows[index] = window
 
         await window.init()
