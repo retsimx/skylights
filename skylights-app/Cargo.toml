@@ -11,3 +11,7 @@ skylights-core = { workspace = true }
 esp-hal = { workspace = true }
 esp-backtrace = { workspace = true }
 esp-println = { workspace = true }
+esp-storage = { version = "0.4.0", default-features = false, features = ["esp32", "nor-flash"] }
+
+embedded-storage = { version = "0.3", default-features = false }
+

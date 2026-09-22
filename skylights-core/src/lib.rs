@@ -8,6 +8,15 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+pub mod ota;
+pub use ota::{
+    EspOtaSelectEntry, FlashError, MockOtaStorage, OtaStorage, OtadataResolution, OtadataSector,
+    Slot, ESP_OTA_IMG_ABORTED, ESP_OTA_IMG_INVALID, ESP_OTA_IMG_NEW, ESP_OTA_IMG_PENDING_VERIFY,
+    ESP_OTA_IMG_UNDEFINED, ESP_OTA_IMG_VALID, FLASH_SECTOR_SIZE, OTADATA_OFFSET,
+    OTADATA_SECTOR_0_OFFSET, OTADATA_SECTOR_1_OFFSET, OTADATA_SIZE, OTA_0_OFFSET, OTA_1_OFFSET,
+    OTA_SLOT_SIZE,
+};
+
 /// Current operational state of a skylight window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
