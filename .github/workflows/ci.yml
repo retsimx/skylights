@@ -45,3 +45,6 @@ jobs:
 
       - name: Build skylights-app for xtensa-esp32-none-elf
         run: cargo build --package skylights-app --target xtensa-esp32-none-elf -Zbuild-std=core,alloc
+
+      - name: Run clippy on skylights-app
+        run: cargo clippy --package skylights-app --target xtensa-esp32-none-elf -Zbuild-std=core,alloc -- -D warnings

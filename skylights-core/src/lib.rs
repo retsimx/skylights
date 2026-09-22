@@ -44,6 +44,7 @@ impl WindowState {
 /// Percentage position of a skylight window (0% = fully closed, 100% = fully open).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "u8"))]
 pub struct Position(u8);
 
 impl Position {
@@ -89,7 +90,7 @@ impl From<u8> for Position {
 /// * `start`: Starting position percentage (0..=100)
 /// * `target`: Target position percentage (0..=100)
 /// * `elapsed_ms`: Elapsed time in milliseconds since motion began
-/// * `total_duration_ms`: Total travel duration in milliseconds between 0% and 100%
+/// * `total_duration_ms`: Travel duration in milliseconds from `start` to `target`
 ///
 /// Returns the current estimated `Position`.
 pub fn calculate_travel_position(
@@ -114,11 +115,7 @@ pub fn calculate_travel_position(
         // Moving closed / reverse
         let delta = start_pct - target_pct;
         let progress = (delta * elapsed_ms) / total_duration_ms;
-        if progress >= start_pct - target_pct {
-            target
-        } else {
-            Position::new((start_pct - progress) as u8)
-        }
+        Position::new((start_pct - progress) as u8)
     }
 }
 
@@ -253,5 +250,9 @@ mod tests {
 
         let (deserialized, _): (WindowState, _) = serde_json_core::from_str(&serialized).unwrap();
         assert_eq!(deserialized, state);
+
+        // Verify Position serde deserialization invariant enforcement via serde(from = "u8")
+        let (pos, _): (Position, _) = serde_json_core::from_str("150").unwrap();
+        assert_eq!(pos, Position::OPEN);
     }
 }
