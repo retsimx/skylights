@@ -21,12 +21,6 @@ pub const OTADATA_SIZE: u32 = 0x002000;
 /// Size of one flash sector (4 KiB = 4096 bytes).
 pub const FLASH_SECTOR_SIZE: u32 = 4096;
 
-/// Offset of otadata Sector 0 within flash.
-pub const OTADATA_SECTOR_0_OFFSET: u32 = 0x00E000;
-
-/// Offset of otadata Sector 1 within flash.
-pub const OTADATA_SECTOR_1_OFFSET: u32 = 0x00F000;
-
 /// New image state (flashed, not yet booted).
 pub const ESP_OTA_IMG_NEW: u32 = 0;
 
@@ -150,7 +144,7 @@ pub fn crc32_ieee(data: &[u8]) -> u32 {
 /// - Offset 0..4:   `ota_seq` (little-endian u32)
 /// - Offset 4..24:  `seq_label` (20 bytes padding / label)
 /// - Offset 24..28: `ota_state` (little-endian u32)
-/// - Offset 28..32: `crc` (little-endian IEEE 802.3 CRC-32 over bytes 0..28)
+/// - Offset 28..32: `crc` (little-endian CRC-32 over the 4-byte `ota_seq`)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EspOtaSelectEntry {
@@ -160,7 +154,8 @@ pub struct EspOtaSelectEntry {
     pub seq_label: [u8; 20],
     /// Bootloader state flag (`ESP_OTA_IMG_*`).
     pub ota_state: u32,
-    /// IEEE 802.3 CRC-32 over bytes 0..28 of this structure.
+    /// IEEE 802.3 CRC-32 over the 4-byte `ota_seq` field (seed 0, final inversion,
+    /// matching ESP-IDF `bootloader_common_ota_select_crc`).
     pub crc: u32,
 }
 
@@ -168,16 +163,19 @@ const _: () = assert!(core::mem::size_of::<EspOtaSelectEntry>() == 32);
 const _: () = assert!(core::mem::align_of::<EspOtaSelectEntry>() == 4);
 
 impl EspOtaSelectEntry {
-    /// Computes the IEEE 802.3 CRC-32 over bytes 0..28 (`ota_seq`, `seq_label`, `ota_state`).
+    /// Computes the CRC-32 over the 4-byte little-endian `ota_seq` field according to
+    /// ESP-IDF `bootloader_common_ota_select_crc` rules (seed 0, reflected IEEE 802.3, final XOR 0xFFFFFFFF).
     pub fn compute_crc(&self) -> u32 {
-        let mut buf = [0u8; 28];
-        buf[0..4].copy_from_slice(&self.ota_seq.to_le_bytes());
-        buf[4..24].copy_from_slice(&self.seq_label);
-        buf[24..28].copy_from_slice(&self.ota_state.to_le_bytes());
-        crc32_ieee(&buf)
+        let bytes = self.ota_seq.to_le_bytes();
+        let mut crc = 0u32;
+        for &byte in &bytes {
+            let idx = ((crc ^ (byte as u32)) & 0xFF) as usize;
+            crc = (crc >> 8) ^ CRC32_TABLE[idx];
+        }
+        crc ^ 0xFFFF_FFFF
     }
 
-    /// Verifies if the stored CRC matches the calculated CRC over bytes 0..28.
+    /// Verifies if the stored CRC matches the calculated CRC over `ota_seq`.
     pub fn is_crc_valid(&self) -> bool {
         self.crc == self.compute_crc()
     }
@@ -207,12 +205,12 @@ impl EspOtaSelectEntry {
         }
     }
 
-    /// Constructs a new entry with `ESP_OTA_IMG_PENDING_VERIFY` state and computed CRC.
+    /// Constructs a new entry with `ESP_OTA_IMG_NEW` state and computed CRC.
     pub fn new_trial(ota_seq: u32) -> Self {
         let mut entry = Self {
             ota_seq,
             seq_label: [0u8; 20],
-            ota_state: ESP_OTA_IMG_PENDING_VERIFY,
+            ota_state: ESP_OTA_IMG_NEW,
             crc: 0,
         };
         entry.crc = entry.compute_crc();
@@ -303,6 +301,9 @@ pub fn resolve_active_slot(
     let usable0 = entry0.is_usable();
     let usable1 = entry1.is_usable();
 
+    let is_trial_state =
+        |state: u32| state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY;
+
     match (usable0, usable1) {
         (true, true) => {
             if entry0.ota_seq >= entry1.ota_seq {
@@ -310,14 +311,14 @@ pub fn resolve_active_slot(
                     active_slot: Slot::from_seq(entry0.ota_seq),
                     active_seq: entry0.ota_seq,
                     active_sector: OtadataSector::Sector0,
-                    is_trial: entry0.ota_state == ESP_OTA_IMG_PENDING_VERIFY,
+                    is_trial: is_trial_state(entry0.ota_state),
                 }
             } else {
                 OtadataResolution {
                     active_slot: Slot::from_seq(entry1.ota_seq),
                     active_seq: entry1.ota_seq,
                     active_sector: OtadataSector::Sector1,
-                    is_trial: entry1.ota_state == ESP_OTA_IMG_PENDING_VERIFY,
+                    is_trial: is_trial_state(entry1.ota_state),
                 }
             }
         }
@@ -325,13 +326,13 @@ pub fn resolve_active_slot(
             active_slot: Slot::from_seq(entry0.ota_seq),
             active_seq: entry0.ota_seq,
             active_sector: OtadataSector::Sector0,
-            is_trial: entry0.ota_state == ESP_OTA_IMG_PENDING_VERIFY,
+            is_trial: is_trial_state(entry0.ota_state),
         },
         (false, true) => OtadataResolution {
             active_slot: Slot::from_seq(entry1.ota_seq),
             active_seq: entry1.ota_seq,
             active_sector: OtadataSector::Sector1,
-            is_trial: entry1.ota_state == ESP_OTA_IMG_PENDING_VERIFY,
+            is_trial: is_trial_state(entry1.ota_state),
         },
         (false, false) => OtadataResolution {
             active_slot: Slot::Ota0,
@@ -352,12 +353,12 @@ pub const fn next_seq_for_slot(current_seq: u32, target_slot: Slot) -> u32 {
             2
         }
     } else {
-        let candidate = current_seq + 1;
+        let candidate = current_seq.saturating_add(1);
         let candidate_is_ota0 = (candidate - 1).is_multiple_of(2);
         if candidate_is_ota0 == target_is_ota0 {
             candidate
         } else {
-            candidate + 1
+            candidate.saturating_add(1)
         }
     }
 }
@@ -367,7 +368,7 @@ pub const fn next_seq_for_slot(current_seq: u32, target_slot: Slot) -> u32 {
 pub enum FlashError {
     /// Requested range extends beyond partition boundary.
     OutOfBounds,
-    /// Address or length does not meet 4 KiB sector alignment requirement.
+    /// Flash address or length does not meet the required alignment.
     AlignmentError,
     /// Physical flash erase failure.
     EraseError,
@@ -385,7 +386,12 @@ impl fmt::Display for FlashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::OutOfBounds => write!(f, "Flash operation extends out of partition bounds"),
-            Self::AlignmentError => write!(f, "Flash address or length is not 4 KiB aligned"),
+            Self::AlignmentError => {
+                write!(
+                    f,
+                    "Flash address or length does not meet the required alignment"
+                )
+            }
             Self::EraseError => write!(f, "Hardware flash sector erase failed"),
             Self::WriteError => write!(f, "Hardware flash write failed"),
             Self::ReadError => write!(f, "Hardware flash read failed"),
@@ -534,6 +540,9 @@ impl OtaStorage for MockOtaStorage {
         if (offset as u64) + (data.len() as u64) > (slot.size() as u64) {
             return Err(FlashError::OutOfBounds);
         }
+        if !offset.is_multiple_of(4) {
+            return Err(FlashError::AlignmentError);
+        }
 
         match slot {
             Slot::Ota0 => self.written_bytes_ota0 += data.len(),
@@ -628,6 +637,10 @@ mod tests {
         // Verify end of ota_1 fits within 4 MB flash (0x400000)
         assert_eq!(Slot::Ota1.offset() + Slot::Ota1.size(), 0x3C0000);
         assert!(Slot::Ota1.offset() + Slot::Ota1.size() <= 0x400000);
+
+        // Verify 64 KiB MMU flash mapping page alignment
+        assert!(Slot::Ota0.offset().is_multiple_of(0x10000));
+        assert!(Slot::Ota1.offset().is_multiple_of(0x10000));
     }
 
     #[test]
@@ -648,11 +661,28 @@ mod tests {
         assert_eq!(next_seq_for_slot(1, Slot::Ota0), 3);
         assert_eq!(next_seq_for_slot(2, Slot::Ota0), 3);
         assert_eq!(next_seq_for_slot(2, Slot::Ota1), 4);
+        assert_eq!(next_seq_for_slot(u32::MAX, Slot::Ota0), u32::MAX);
+    }
+
+    #[test]
+    fn test_esp_ota_select_entry_crc_golden_vector() {
+        let entry = EspOtaSelectEntry {
+            ota_seq: 1,
+            seq_label: [0u8; 20],
+            ota_state: ESP_OTA_IMG_NEW,
+            crc: 0,
+        };
+        assert_eq!(entry.compute_crc(), 0x4743_989A);
+
+        let new_valid_entry = EspOtaSelectEntry::new_valid(1);
+        assert_eq!(new_valid_entry.compute_crc(), 0x4743_989A);
+        assert_eq!(new_valid_entry.crc, 0x4743_989A);
     }
 
     #[test]
     fn test_esp_ota_select_entry_crc_validation() {
         let entry = EspOtaSelectEntry::new_valid(1);
+        assert_eq!(entry.crc, 0x4743_989A);
         assert!(entry.is_crc_valid());
         assert!(entry.is_usable());
 
@@ -662,15 +692,27 @@ mod tests {
         assert_eq!(parsed, entry);
         assert!(parsed.is_crc_valid());
 
-        // Corrupt sequence
+        // Corrupt sequence -> CRC mismatch
         let mut corrupted = entry;
         corrupted.ota_seq = 2;
         assert!(!corrupted.is_crc_valid());
 
-        // Corrupt state
+        // Corrupt CRC explicitly
+        let mut corrupted_crc = entry;
+        corrupted_crc.crc ^= 0xDEAD_BEEF;
+        assert!(!corrupted_crc.is_crc_valid());
+        assert!(!corrupted_crc.is_usable());
+
+        // State changes do not affect CRC because CRC only covers ota_seq,
+        // but invalid/aborted states make the entry unusable.
         let mut corrupted_state = entry;
         corrupted_state.ota_state = ESP_OTA_IMG_ABORTED;
-        assert!(!corrupted_state.is_crc_valid());
+        assert!(corrupted_state.is_crc_valid());
+        assert!(!corrupted_state.is_usable());
+
+        corrupted_state.ota_state = ESP_OTA_IMG_INVALID;
+        assert!(corrupted_state.is_crc_valid());
+        assert!(!corrupted_state.is_usable());
 
         // Erased flash (all 0xFF) is invalid
         let erased = EspOtaSelectEntry::from_bytes(&[0xFF; 32]);
@@ -694,13 +736,20 @@ mod tests {
         assert_eq!(res.active_seq, 1);
         assert_eq!(res.active_sector, OtadataSector::Sector0);
 
-        // Scenario 3: Sector 0 valid (seq 1), Sector 1 valid (seq 2) -> Sector 1 wins (Ota1)
+        // Scenario 3: Sector 0 valid (seq 1), Sector 1 trial (seq 2) -> Sector 1 wins (Ota1)
         let entry1 = EspOtaSelectEntry::new_trial(2);
         let res = resolve_active_slot(&entry0, &entry1);
         assert_eq!(res.active_slot, Slot::Ota1);
         assert_eq!(res.active_seq, 2);
         assert_eq!(res.active_sector, OtadataSector::Sector1);
         assert!(res.is_trial);
+
+        // Also verify ESP_OTA_IMG_PENDING_VERIFY is recognized as trial boot state
+        let mut pending_entry = entry1;
+        pending_entry.ota_state = ESP_OTA_IMG_PENDING_VERIFY;
+        let res_pending = resolve_active_slot(&entry0, &pending_entry);
+        assert_eq!(res_pending.active_slot, Slot::Ota1);
+        assert!(res_pending.is_trial);
 
         // Scenario 4: Rollback - Sector 1 has higher sequence (seq 2) but is marked INVALID
         let mut invalid_entry1 = entry1;
@@ -739,7 +788,7 @@ mod tests {
         let trial_res = block_on(storage.mark_trial_boot(Slot::Ota1));
         assert!(trial_res.is_ok());
 
-        // Now active slot is Ota1 in trial mode (PENDING_VERIFY)
+        // Now active slot is Ota1 in trial mode (NEW / PENDING_VERIFY)
         assert_eq!(block_on(storage.active_slot()), Slot::Ota1);
         assert_eq!(block_on(storage.passive_slot()), Slot::Ota0);
         assert!(storage.resolution().is_trial);
@@ -791,6 +840,12 @@ mod tests {
         let err = block_on(storage.write_chunk(Slot::Ota0, OTA_SLOT_SIZE - 2, &[1, 2, 3, 4]))
             .unwrap_err();
         assert_eq!(err, FlashError::OutOfBounds);
+
+        // Unaligned write offset (not 4-byte aligned)
+        let err = block_on(storage.write_chunk(Slot::Ota0, 1, &[1, 2, 3, 4])).unwrap_err();
+        assert_eq!(err, FlashError::AlignmentError);
+        let err = block_on(storage.write_chunk(Slot::Ota0, 3, &[1, 2, 3, 4])).unwrap_err();
+        assert_eq!(err, FlashError::AlignmentError);
 
         // Valid write at boundary edge
         let ok = block_on(storage.write_chunk(Slot::Ota0, OTA_SLOT_SIZE - 4, &[1, 2, 3, 4]));
