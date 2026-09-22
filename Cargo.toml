@@ -30,7 +30,14 @@ debug = 2
 incremental = false
 overflow-checks = false
 
+[profile.release.package.esp-storage]
+opt-level = 3
+
 [profile.dev]
 opt-level = "s"
 debug = 2
 overflow-checks = true
+
+[profile.dev.package.esp-storage]
+opt-level = 3
+
