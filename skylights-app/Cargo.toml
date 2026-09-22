@@ -1,0 +1,13 @@
+[package]
+name = "skylights-app"
+version = "0.1.0"
+edition = "2021"
+authors = ["retsimx"]
+license = "MIT OR Apache-2.0"
+description = "ESP32 firmware application for Skylights controller"
+
+[dependencies]
+skylights-core = { workspace = true }
+esp-hal = { workspace = true }
+esp-backtrace = { workspace = true }
+esp-println = { workspace = true }

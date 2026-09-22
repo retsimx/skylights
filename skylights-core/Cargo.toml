@@ -1,0 +1,15 @@
+[package]
+name = "skylights-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["retsimx"]
+license = "MIT OR Apache-2.0"
+description = "Hardware-agnostic core logic, window models, and state representations for Skylights"
+
+[dependencies]
+serde = { workspace = true, optional = true }
+serde-json-core = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde", "dep:serde-json-core"]
