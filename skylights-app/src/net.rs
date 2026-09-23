@@ -154,8 +154,12 @@ async fn associate(controller: &mut WifiController<'static>, stack: Stack<'stati
 #[embassy_executor::task]
 async fn connection_task(mut controller: WifiController<'static>, stack: Stack<'static>) {
     let client_config = Configuration::Client(ClientConfiguration {
-        ssid: crate::secrets::WIFI_SSID.try_into().unwrap(),
-        password: crate::secrets::WIFI_PASS.try_into().unwrap(),
+        ssid: crate::secrets::WIFI_SSID
+            .try_into()
+            .expect("WIFI_SSID exceeds 32 bytes"),
+        password: crate::secrets::WIFI_PASS
+            .try_into()
+            .expect("WIFI_PASS exceeds 64 bytes"),
         ..Default::default()
     });
     controller.set_configuration(&client_config).unwrap();
