@@ -11,10 +11,20 @@ use std::path::Path;
 use std::process::Command;
 
 /// Auto-provisions `src/secrets.rs` from `src/secrets.example.rs` if absent.
+///
+/// In release mode, aborts compilation if `secrets.rs` is missing to prevent
+/// shipping firmware with placeholder credentials.
 fn ensure_secrets(manifest_path: &Path) {
     let secrets_path = manifest_path.join("src/secrets.rs");
     let secrets_example_path = manifest_path.join("src/secrets.example.rs");
     if !secrets_path.exists() && secrets_example_path.exists() {
+        if std::env::var("PROFILE").as_deref() == Ok("release") {
+            panic!(
+                "skylights-app/src/secrets.rs is missing in release mode. \
+                 Configure real credentials by copying secrets.example.rs to secrets.rs \
+                 and filling in your network details before building release firmware."
+            );
+        }
         if let Err(err) = std::fs::copy(&secrets_example_path, &secrets_path) {
             println!(
                 "cargo:warning=Failed to copy secrets.example.rs to secrets.rs: {}",
