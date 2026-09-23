@@ -21,6 +21,7 @@ embassy-sync = { workspace = true }
 static_cell = { workspace = true }
 embassy-net = { workspace = true, features = ["tcp", "udp", "dns", "dhcpv4", "proto-ipv4", "medium-ethernet"] }
 embassy-futures = { workspace = true }
+minimq = { workspace = true }
 
 embedded-storage = { version = "0.3", default-features = false }
 

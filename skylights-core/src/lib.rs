@@ -16,6 +16,16 @@ pub use ota::{
     OTA_0_OFFSET, OTA_1_OFFSET, OTA_SLOT_SIZE,
 };
 
+#[cfg(feature = "serde")]
+pub mod mqtt;
+#[cfg(feature = "serde")]
+pub use mqtt::{
+    format_get_response, format_state, parse_get, parse_reset, parse_set, parse_stop, GetCommand,
+    Index, MqttError, Percentage, SetCommand, StateMessage, StopCommand, WindowTelemetry,
+    STATE_VERSION, TOPIC_GET, TOPIC_GET_RESPONSE, TOPIC_RESET, TOPIC_SET, TOPIC_STATE, TOPIC_STOP,
+    TOPIC_WILDCARD,
+};
+
 pub mod version;
 pub use version::{parse_version, VersionError};
 
