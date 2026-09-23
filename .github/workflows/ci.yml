@@ -21,6 +21,9 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Generate dummy secrets.rs
+        run: cp skylights-app/src/secrets.example.rs skylights-app/src/secrets.rs
+
       - name: Check code formatting
         run: cargo fmt --all --check
 
