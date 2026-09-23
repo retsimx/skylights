@@ -145,9 +145,10 @@ fn valid_host_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'
 }
 
-/// A path/host segment must be non-empty and use only [`valid_host_byte`]s.
+/// A path/host segment must be non-empty, must not be a `.`/`..` traversal
+/// token, and must use only [`valid_host_byte`]s.
 fn valid_segment(segment: &str) -> bool {
-    !segment.is_empty() && segment.bytes().all(valid_host_byte)
+    !segment.is_empty() && segment != "." && segment != ".." && segment.bytes().all(valid_host_byte)
 }
 
 /// Parses a decimal version number, trimming ASCII whitespace.
@@ -365,6 +366,20 @@ mod tests {
         assert!(matches!(
             parse_url("https://ota.example.com", "bad/proj"),
             Err(UrlError::Project)
+        ));
+
+        // `.`/`..` traversal tokens are rejected in the project and path segments.
+        assert!(matches!(
+            parse_url("https://ota.example.com", "."),
+            Err(UrlError::Project)
+        ));
+        assert!(matches!(
+            parse_url("https://ota.example.com", ".."),
+            Err(UrlError::Project)
+        ));
+        assert!(matches!(
+            parse_url("https://ota.example.com/../x", "proj"),
+            Err(UrlError::Path)
         ));
 
         assert!(matches!(

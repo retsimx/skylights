@@ -153,8 +153,10 @@ impl HeadParser {
         if !(line.starts_with(b"HTTP/1.0 ") || line.starts_with(b"HTTP/1.1 ")) {
             return Err(HeadError::MalformedStatusLine);
         }
+        // The reason phrase is optional (RFC 7230), so only the version and the
+        // status code are required.
         let token_count = line.split(|&b| b == b' ').filter(|s| !s.is_empty()).count();
-        if token_count < 3 {
+        if token_count < 2 {
             return Err(HeadError::TooFewStatusTokens);
         }
         let rest = &line[9..];
@@ -403,7 +405,7 @@ mod tests {
     fn rejects_too_few_status_tokens_and_non_numeric_status() {
         let mut parser = HeadParser::new();
         assert_eq!(
-            feed(&mut parser, b"HTTP/1.0 200\r\n\r\n"),
+            feed(&mut parser, b"HTTP/1.0 \r\n\r\n"),
             HeadEvent::Reject(HeadError::TooFewStatusTokens)
         );
 
@@ -411,6 +413,28 @@ mod tests {
         assert_eq!(
             feed(&mut parser, b"HTTP/1.0 abc OK\r\n\r\n"),
             HeadEvent::Reject(HeadError::NonNumericStatus)
+        );
+    }
+
+    #[test]
+    fn accepts_status_line_with_empty_reason_phrase() {
+        // RFC 7230 makes the reason phrase optional.
+        let mut parser = HeadParser::new();
+        assert_eq!(
+            feed(&mut parser, b"HTTP/1.1 200\r\nContent-Length: 0\r\n\r\n"),
+            HeadEvent::Complete(ResponseHead {
+                status: 200,
+                content_length: Some(0),
+            })
+        );
+
+        let mut parser = HeadParser::new();
+        assert_eq!(
+            feed(&mut parser, b"HTTP/1.0 200 \r\nContent-Length: 5\r\n\r\n"),
+            HeadEvent::Complete(ResponseHead {
+                status: 200,
+                content_length: Some(5),
+            })
         );
     }
 
