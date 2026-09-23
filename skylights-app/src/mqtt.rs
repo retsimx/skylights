@@ -255,15 +255,24 @@ fn parse_action(topic: &str, payload: &[u8]) -> Action {
     match topic {
         TOPIC_SET => match parse_set(payload) {
             Ok(command) => Action::Set(command.index, command.percentage),
-            Err(_) => Action::Ignore,
+            Err(err) => {
+                println!("MQTT: rejected malformed set command: {:?}", err);
+                Action::Ignore
+            }
         },
         TOPIC_GET => match parse_get(payload) {
             Ok(command) => Action::Get(command.index),
-            Err(_) => Action::Ignore,
+            Err(err) => {
+                println!("MQTT: rejected malformed get command: {:?}", err);
+                Action::Ignore
+            }
         },
         TOPIC_STOP => match parse_stop(payload) {
             Ok(command) => Action::Stop(command.index),
-            Err(_) => Action::Ignore,
+            Err(err) => {
+                println!("MQTT: rejected malformed stop command: {:?}", err);
+                Action::Ignore
+            }
         },
         TOPIC_RESET => {
             let _ = parse_reset(payload);
