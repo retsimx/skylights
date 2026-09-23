@@ -1,5 +1,9 @@
-//! Over-The-Air (OTA) update domain models, partition table geometry,
-//! IEEE 802.3 CRC-32, bootloader otadata serialization, and storage abstraction.
+//! ESP32 flash-partition geometry and OTA storage abstraction.
+//!
+//! The pre-existing flash concerns split out of [`crate::ota`]: slot geometry,
+//! IEEE 802.3 CRC-32, the 32-byte bootloader `esp_ota_select_entry` (`otadata`)
+//! serialization and arbitration rules, and the async [`OtaStorage`] trait with
+//! its host-testable [`MockOtaStorage`].
 
 use core::fmt;
 

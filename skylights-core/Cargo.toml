@@ -9,6 +9,7 @@ description = "Hardware-agnostic core logic, window models, and state representa
 [dependencies]
 serde = { workspace = true, optional = true }
 serde-json-core = { workspace = true, optional = true }
+sha2 = { workspace = true }
 
 [features]
 default = ["serde"]
