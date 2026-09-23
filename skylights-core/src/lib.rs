@@ -16,6 +16,9 @@ pub use ota::{
     OTA_0_OFFSET, OTA_1_OFFSET, OTA_SLOT_SIZE,
 };
 
+pub mod version;
+pub use version::{parse_version, VersionError};
+
 /// Current operational state of a skylight window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]

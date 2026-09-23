@@ -43,6 +43,9 @@ jobs:
           default: true
           buildtargets: esp32
 
+      - name: Generate dummy secrets.rs
+        run: cp skylights-app/src/secrets.example.rs skylights-app/src/secrets.rs
+
       - name: Build skylights-app for xtensa-esp32-none-elf
         run: cargo build --package skylights-app --target xtensa-esp32-none-elf -Zbuild-std=core,alloc
 
