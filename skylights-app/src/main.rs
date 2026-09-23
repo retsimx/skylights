@@ -7,7 +7,9 @@ extern crate alloc;
 
 pub mod flash;
 pub mod heap;
+pub mod mqtt;
 pub mod net;
+pub mod ota;
 pub mod secrets;
 pub mod window;
 
@@ -76,7 +78,7 @@ async fn main(spawner: Spawner) {
     let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
     esp_hal_embassy::init(timg1.timer0);
 
-    let _stack = net::init(
+    let stack = net::init(
         &spawner,
         peripherals.TIMG0,
         peripherals.RNG,
@@ -116,6 +118,13 @@ async fn main(spawner: Spawner) {
         "Window controller tasks spawned ({} windows)",
         window::WINDOW_COUNT
     );
+
+    if spawner.spawn(mqtt::mqtt_task(stack)).is_err() {
+        println!("ERROR: failed to spawn mqtt_task; MQTT will not run");
+    }
+    if spawner.spawn(ota::ota_placeholder_task()).is_err() {
+        println!("ERROR: failed to spawn ota_placeholder_task; OTA trigger will not be observed");
+    }
 
     loop {
         Timer::after(Duration::from_secs(3600)).await;

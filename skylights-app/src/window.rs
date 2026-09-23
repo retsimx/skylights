@@ -10,6 +10,7 @@ use embassy_executor::task;
 use embassy_futures::select::{select, Either};
 use embassy_sync::channel::{Channel, Receiver};
 use embassy_sync::mutex::Mutex;
+use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::gpio::Output;
 use esp_hal::sync::RawMutex;
@@ -37,6 +38,30 @@ pub static WINDOW_COMMANDS: [WindowChannel; WINDOW_COUNT] =
 
 /// Serialises active-low pulse sequences across all windows.
 static ACTUATION_LOCK: Mutex<RawMutex, ()> = Mutex::new(());
+
+/// Last known state of a single window, shared with the MQTT task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSnapshot {
+    /// Last settled (or origin) position, 0–100.
+    pub percentage: u8,
+    /// True while the window is travelling.
+    pub moving: bool,
+}
+
+impl WindowSnapshot {
+    /// The fully closed, idle snapshot used to initialise all windows.
+    pub const IDLE: Self = Self {
+        percentage: 0,
+        moving: false,
+    };
+}
+
+/// Current snapshot of every window, indexed by window id.
+pub static WINDOW_STATES: Mutex<RawMutex, [WindowSnapshot; WINDOW_COUNT]> =
+    Mutex::new([WindowSnapshot::IDLE; WINDOW_COUNT]);
+
+/// Signalled whenever a window's snapshot changes.
+pub static STATE_CHANGED: Signal<RawMutex, ()> = Signal::new();
 
 /// The three actuation outputs of a single window, all active-low.
 pub struct WindowPins<'d> {
@@ -91,23 +116,38 @@ impl<'d> WindowDriver<'d> {
 
 /// Owns a window's positioner, driver, and command receiver and runs its loop.
 pub struct WindowController<'d> {
+    id: usize,
     positioner: WindowPositioner,
     driver: WindowDriver<'d>,
     receiver: Receiver<'d, RawMutex, WindowCommand, 4>,
 }
 
 impl<'d> WindowController<'d> {
-    /// Creates a controller from its positioner, driver, and command receiver.
+    /// Creates a controller from its window id, positioner, driver, and receiver.
     pub const fn new(
+        id: usize,
         positioner: WindowPositioner,
         driver: WindowDriver<'d>,
         receiver: Receiver<'d, RawMutex, WindowCommand, 4>,
     ) -> Self {
         Self {
+            id,
             positioner,
             driver,
             receiver,
         }
+    }
+
+    /// Publishes this window's current snapshot and wakes the MQTT task.
+    async fn record_state(&self) {
+        {
+            let mut states = WINDOW_STATES.lock().await;
+            states[self.id] = WindowSnapshot {
+                percentage: self.positioner.position().percent(),
+                moving: self.positioner.is_moving(),
+            };
+        }
+        STATE_CHANGED.signal(());
     }
 
     /// Consumes commands forever, driving the window and honouring interrupts.
@@ -117,6 +157,7 @@ impl<'d> WindowController<'d> {
                 WindowCommand::SetTarget(target) => self.drive_to(target).await,
                 WindowCommand::Stop => {
                     self.positioner.stop(0);
+                    self.record_state().await;
                 }
             }
         }
@@ -132,6 +173,7 @@ impl<'d> WindowController<'d> {
             let Some(plan) = self.positioner.request(target) else {
                 return;
             };
+            self.record_state().await;
             self.driver.actuate(plan.actuation).await;
 
             let start = Instant::now();
@@ -146,18 +188,21 @@ impl<'d> WindowController<'d> {
                         self.driver.actuate(Actuation::Stop).await;
                     }
                     self.positioner.finish();
+                    self.record_state().await;
                     return;
                 }
                 Either::Second(WindowCommand::Stop) => {
                     let elapsed = start.elapsed().as_millis();
                     self.driver.actuate(Actuation::Stop).await;
                     self.positioner.stop(elapsed);
+                    self.record_state().await;
                     return;
                 }
                 Either::Second(WindowCommand::SetTarget(next)) => {
                     let elapsed = start.elapsed().as_millis();
                     self.driver.actuate(Actuation::Stop).await;
                     self.positioner.stop(elapsed);
+                    self.record_state().await;
                     target = next;
                 }
             }
@@ -169,7 +214,7 @@ impl<'d> WindowController<'d> {
 #[task(pool_size = 3)]
 pub async fn window_task(id: usize, driver: WindowDriver<'static>) -> ! {
     let receiver = WINDOW_COMMANDS[id].receiver();
-    WindowController::new(WindowPositioner::new(), driver, receiver)
+    WindowController::new(id, WindowPositioner::new(), driver, receiver)
         .run()
         .await
 }
