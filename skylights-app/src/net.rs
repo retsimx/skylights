@@ -7,7 +7,7 @@
 //! be host-tested.
 //!
 //! Link status is published on [`WIFI_CONNECTED`] as an `embassy-sync`
-//! `Watch`, so any number of future consumers (MQTT, OTA) can observe the
+//! `Watch`, so its consumers (MQTT and the post-swap self-test) can observe the
 //! latest state, including late subscribers.
 
 use core::net::Ipv4Addr;

@@ -77,6 +77,9 @@ async fn main(spawner: Spawner) {
     // esp-wifi drives TIMG0; embassy time drives TIMG1. The timer groups are
     // never reused.
     let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
+    // `TimerGroup` is not `Drop`, so `wdt` and `timer0` are moved out
+    // independently; the WDT guards the post-swap self-test window.
+    let wdt = timg1.wdt;
     esp_hal_embassy::init(timg1.timer0);
 
     // `Rng` is `Copy` over the phantom `RNG` peripheral, so the same instance
@@ -109,6 +112,14 @@ async fn main(spawner: Spawner) {
         Output::new(peripherals.GPIO23, Level::High),
     );
 
+    // One-shot boot invariant check: every window output must be inactive (HIGH)
+    // before the pin sets are moved into their drivers.
+    let gpio_safe = ota::selftest::probe_gpio_safe(&[&w1, &w2, &w3]);
+    println!(
+        "GPIO boot probe: all window outputs inactive = {}",
+        gpio_safe
+    );
+
     spawner
         .spawn(window::window_task(0, window::WindowDriver::new(w1)))
         .unwrap();
@@ -129,6 +140,12 @@ async fn main(spawner: Spawner) {
     }
     if spawner.spawn(ota::ota_task(stack, rng)).is_err() {
         println!("ERROR: failed to spawn ota_task; OTA updates will not run");
+    }
+    if spawner
+        .spawn(ota::selftest::self_test_task(wdt, gpio_safe))
+        .is_err()
+    {
+        println!("ERROR: failed to spawn self_test_task; trial boot will not be confirmed");
     }
     // One check at boot, in addition to the `skylight/reset` MQTT trigger.
     ota::OTA_TRIGGER.signal(());

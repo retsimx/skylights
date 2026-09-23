@@ -8,6 +8,7 @@
 //! `code=` and the task waits again; the chip is reset only after a verified
 //! image has been committed to `otadata`.
 
+pub mod selftest;
 mod transport;
 
 use core::fmt::Write as _;
