@@ -19,6 +19,9 @@ pub use ota::{
 pub mod version;
 pub use version::{parse_version, VersionError};
 
+pub mod net;
+pub use net::{LinkState, ReconnectBackoff, BACKOFF_FACTOR, BACKOFF_INITIAL_MS, BACKOFF_MAX_MS};
+
 pub mod window;
 pub use window::{
     interrupted_position, travel_duration_ms, Actuation, Direction, TravelPlan, WindowPositioner,
