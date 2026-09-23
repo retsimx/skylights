@@ -23,7 +23,7 @@ pub const PULSE_HIGH_MS: u64 = 75;
 /// actuated, in milliseconds.
 pub const PULSE_SETTLE_MS: u64 = 400;
 
-/// Duration of one low/high pulse cycle, in milliseconds.
+/// Duration of the two low/high pulse cycles (the pulse burst), in milliseconds.
 pub const PULSE_CYCLE_MS: u64 = 2 * (PULSE_LOW_MS + PULSE_HIGH_MS);
 
 /// Total duration of the two-pulse sequence plus settle time, in milliseconds.
@@ -137,7 +137,7 @@ impl WindowPositioner {
 
     /// Returns true while the window is travelling (`Opening` or `Closing`).
     pub const fn is_moving(&self) -> bool {
-        matches!(self.state, WindowState::Opening | WindowState::Closing)
+        self.state.is_moving()
     }
 
     /// Requests travel to `target` and returns the resulting [`TravelPlan`].
