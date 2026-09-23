@@ -8,9 +8,12 @@ extern crate alloc;
 pub mod flash;
 pub mod heap;
 pub mod secrets;
+pub mod window;
 
+use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
-use esp_hal::main;
+use esp_hal::gpio::{Level, Output};
 use esp_println::println;
 
 /// Verifies basic dynamic allocation functionality from the static heap.
@@ -55,9 +58,9 @@ fn log_boot_banner() {
     }
 }
 
-#[main]
-fn main() -> ! {
-    let _peripherals = esp_hal::init(esp_hal::Config::default());
+#[esp_hal_embassy::main]
+async fn main(spawner: Spawner) {
+    let peripherals = esp_hal::init(esp_hal::Config::default());
 
     // Initialize 48 KiB static heap allocator
     heap::init_heap();
@@ -65,12 +68,44 @@ fn main() -> ! {
     // Verify heap dynamic allocation
     verify_heap_allocations();
 
-    // Basic sanity verification of core crate integration
-    let _initial_position = skylights_core::Position::CLOSED;
-    let _initial_state = skylights_core::WindowState::Closed;
-
     log_boot_banner();
 
-    #[allow(clippy::empty_loop)]
-    loop {}
+    let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
+    esp_hal_embassy::init(timg0.timer0);
+
+    // All pins initialised Level::High (inactive) -> boot invariant.
+    let w1 = window::WindowPins::new(
+        Output::new(peripherals.GPIO2, Level::High),
+        Output::new(peripherals.GPIO4, Level::High),
+        Output::new(peripherals.GPIO16, Level::High),
+    );
+    let w2 = window::WindowPins::new(
+        Output::new(peripherals.GPIO19, Level::High),
+        Output::new(peripherals.GPIO5, Level::High),
+        Output::new(peripherals.GPIO18, Level::High),
+    );
+    let w3 = window::WindowPins::new(
+        Output::new(peripherals.GPIO21, Level::High),
+        Output::new(peripherals.GPIO22, Level::High),
+        Output::new(peripherals.GPIO23, Level::High),
+    );
+
+    spawner
+        .spawn(window::window_task(0, window::WindowDriver::new(w1)))
+        .unwrap();
+    spawner
+        .spawn(window::window_task(1, window::WindowDriver::new(w2)))
+        .unwrap();
+    spawner
+        .spawn(window::window_task(2, window::WindowDriver::new(w3)))
+        .unwrap();
+
+    println!(
+        "Window controller tasks spawned ({} windows)",
+        window::WINDOW_COUNT
+    );
+
+    loop {
+        Timer::after(Duration::from_secs(3600)).await;
+    }
 }
