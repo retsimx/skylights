@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod flash;
 pub mod heap;
+pub mod net;
 pub mod secrets;
 pub mod window;
 
@@ -62,7 +63,7 @@ fn log_boot_banner() {
 async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // Initialize 48 KiB static heap allocator
+    // Initialize 96 KiB static heap allocator
     heap::init_heap();
 
     // Verify heap dynamic allocation
@@ -70,8 +71,19 @@ async fn main(spawner: Spawner) {
 
     log_boot_banner();
 
-    let timg0 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG0);
-    esp_hal_embassy::init(timg0.timer0);
+    // esp-wifi drives TIMG0; embassy time drives TIMG1. The timer groups are
+    // never reused.
+    let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
+    esp_hal_embassy::init(timg1.timer0);
+
+    let _stack = net::init(
+        &spawner,
+        peripherals.TIMG0,
+        peripherals.RNG,
+        peripherals.RADIO_CLK,
+        peripherals.WIFI,
+    );
+    println!("Wi-Fi station and network tasks spawned");
 
     // All pins initialised Level::High (inactive) -> boot invariant.
     let w1 = window::WindowPins::new(
