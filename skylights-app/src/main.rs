@@ -17,6 +17,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::gpio::{Level, Output};
+use esp_hal::rng::Rng;
 use esp_println::println;
 
 /// Verifies basic dynamic allocation functionality from the static heap.
@@ -78,10 +79,14 @@ async fn main(spawner: Spawner) {
     let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
     esp_hal_embassy::init(timg1.timer0);
 
+    // `Rng` is `Copy` over the phantom `RNG` peripheral, so the same instance
+    // is shared by esp-wifi here and by the OTA task below.
+    let rng = Rng::new(peripherals.RNG);
+
     let stack = net::init(
         &spawner,
         peripherals.TIMG0,
-        peripherals.RNG,
+        rng,
         peripherals.RADIO_CLK,
         peripherals.WIFI,
     );
@@ -122,9 +127,11 @@ async fn main(spawner: Spawner) {
     if spawner.spawn(mqtt::mqtt_task(stack)).is_err() {
         println!("ERROR: failed to spawn mqtt_task; MQTT will not run");
     }
-    if spawner.spawn(ota::ota_placeholder_task()).is_err() {
-        println!("ERROR: failed to spawn ota_placeholder_task; OTA trigger will not be observed");
+    if spawner.spawn(ota::ota_task(stack, rng)).is_err() {
+        println!("ERROR: failed to spawn ota_task; OTA updates will not run");
     }
+    // One check at boot, in addition to the `skylight/reset` MQTT trigger.
+    ota::OTA_TRIGGER.signal(());
 
     loop {
         Timer::after(Duration::from_secs(3600)).await;

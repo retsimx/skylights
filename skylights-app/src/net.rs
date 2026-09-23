@@ -19,7 +19,7 @@ use embassy_net::{Config, Runner, Stack, StackResources};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::Watch;
 use embassy_time::{with_timeout, Duration, Timer};
-use esp_hal::peripherals::{RADIO_CLK, RNG, TIMG0, WIFI};
+use esp_hal::peripherals::{RADIO_CLK, TIMG0, WIFI};
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
@@ -52,15 +52,18 @@ const DHCP_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// `timg0` drives `esp-wifi`; embassy time is driven by a different timer
 /// group (TIMG1) initialized in `main`. The two timer groups are never reused.
+///
+/// The caller owns the [`Rng`] and passes it in: [`Rng`] is `Copy` over the
+/// (phantom) `RNG` peripheral, so `main` can hand the same instance to both
+/// this function and the OTA task without re-initialising the peripheral.
 pub fn init(
     spawner: &Spawner,
     timg0: TIMG0,
-    rng: RNG,
+    mut rng: Rng,
     radio_clk: RADIO_CLK,
     wifi: WIFI,
 ) -> Stack<'static> {
     let timg0 = TimerGroup::new(timg0);
-    let mut rng = Rng::new(rng);
 
     let ctrl = WIFI_INIT.init(esp_wifi::init(timg0.timer0, rng, radio_clk).unwrap());
     let (wifi_interface, controller) =
