@@ -23,6 +23,7 @@ use skylights_core::ota::{
     decide, parse_sha256_hex, parse_url, parse_version, Decision, Slot, FLASH_SECTOR_SIZE,
 };
 use skylights_core::{FlashError, OtaStorage};
+use static_cell::StaticCell;
 
 use crate::flash::EspFlashStorage;
 use crate::secrets;
@@ -43,59 +44,57 @@ const NAME_MAX_BYTES: usize = 48;
 
 /// Writes a streamed image into one passive slot through [`OtaStorage`].
 ///
-/// [`apply_update`] writes strictly increasing offsets, so a single
-/// `next_erased_sector` watermark is sound. Whole aligned words are written
-/// straight through (one flash call per chunk) and only a <4-byte tail is
-/// staged; the ESP32 flash word is 4 bytes.
+/// Flash is programmed in **whole 4 KiB sectors at 4 KiB-aligned offsets**. That
+/// is required, not cosmetic: esp-storage's ESP32 write programs 32-byte blocks
+/// at `addr + 32k` and never splits at the 256-byte flash page boundary, so a
+/// write starting at a non-page-aligned offset shifts data. The HTTP stream
+/// arrives in arbitrary chunk sizes, so we buffer it into full sectors; every
+/// flash write is then page-safe.
 struct SlotFlasher<'a> {
     storage: &'a mut EspFlashStorage,
     slot: Slot,
-    next_erased_sector: u32,
-    staging: [u8; 4],
-    staging_len: usize,
-    write_offset: u32,
+    buf: &'a mut [u8],
+    len: usize,
+    sector: u32,
     next_log: u32,
 }
 
 impl<'a> SlotFlasher<'a> {
-    fn new(storage: &'a mut EspFlashStorage, slot: Slot) -> Self {
+    fn new(storage: &'a mut EspFlashStorage, slot: Slot, buf: &'a mut [u8]) -> Self {
+        debug_assert_eq!(buf.len(), FLASH_SECTOR_SIZE as usize);
         Self {
             storage,
             slot,
-            next_erased_sector: 0,
-            staging: [0; 4],
-            staging_len: 0,
-            write_offset: 0,
+            buf,
+            len: 0,
+            sector: 0,
             next_log: 128 * 1024,
         }
     }
 
-    /// Erases every sector overlapping `[offset, offset + len)` not yet erased.
-    async fn ensure_erased(&mut self, offset: u32, len: u32) -> Result<(), FlashError> {
-        if len == 0 {
-            return Ok(());
+    /// Erases and writes the buffered sector (padded to a 4-byte word with
+    /// 0xFF), then advances to the next sector.
+    async fn flush_sector(&mut self) -> Result<(), FlashError> {
+        let mut end = self.len;
+        while !end.is_multiple_of(4) {
+            self.buf[end] = 0xFF;
+            end += 1;
         }
-        let last = (offset + len - 1) / FLASH_SECTOR_SIZE;
-        while self.next_erased_sector <= last {
-            self.storage
-                .erase_range(
-                    self.slot,
-                    self.next_erased_sector * FLASH_SECTOR_SIZE,
-                    FLASH_SECTOR_SIZE,
-                )
-                .await?;
-            self.next_erased_sector += 1;
-        }
-        Ok(())
-    }
-
-    /// Writes the staged <4-byte tail as one padded word and advances.
-    async fn flush_word(&mut self) -> Result<(), FlashError> {
-        self.ensure_erased(self.write_offset, 4).await?;
+        let offset = self.sector * FLASH_SECTOR_SIZE;
         self.storage
-            .write_chunk(self.slot, self.write_offset, &self.staging)
+            .erase_range(self.slot, offset, FLASH_SECTOR_SIZE)
             .await?;
-        self.write_offset += 4;
+        self.storage
+            .write_chunk(self.slot, offset, &self.buf[..end])
+            .await?;
+
+        self.sector += 1;
+        self.len = 0;
+        let written = self.sector * FLASH_SECTOR_SIZE;
+        if written >= self.next_log {
+            println!("OTA: wrote {} KiB", written / 1024);
+            self.next_log = written + 128 * 1024;
+        }
         Ok(())
     }
 
@@ -113,46 +112,29 @@ impl Flasher for SlotFlasher<'_> {
 
     async fn write(&mut self, _offset: usize, data: &[u8]) -> Result<(), Self::Error> {
         let mut data = data;
-        while self.staging_len > 0 && !data.is_empty() {
-            self.staging[self.staging_len] = data[0];
-            self.staging_len += 1;
-            data = &data[1..];
-            if self.staging_len == 4 {
-                self.staging_len = 0;
-                self.flush_word().await?;
+        while !data.is_empty() {
+            let space = self.buf.len() - self.len;
+            let take = space.min(data.len());
+            self.buf[self.len..self.len + take].copy_from_slice(&data[..take]);
+            self.len += take;
+            data = &data[take..];
+            if self.len == self.buf.len() {
+                self.flush_sector().await?;
             }
-        }
-        let aligned = data.len() - (data.len() % 4);
-        if aligned > 0 {
-            self.ensure_erased(self.write_offset, aligned as u32)
-                .await?;
-            self.storage
-                .write_chunk(self.slot, self.write_offset, &data[..aligned])
-                .await?;
-            self.write_offset += aligned as u32;
-            if self.write_offset >= self.next_log {
-                println!("OTA: wrote {} KiB", self.write_offset / 1024);
-                self.next_log = self.write_offset + 128 * 1024;
-            }
-        }
-        for &byte in &data[aligned..] {
-            self.staging[self.staging_len] = byte;
-            self.staging_len += 1;
         }
         Ok(())
     }
 
     async fn mark_updated(&mut self) -> Result<(), Self::Error> {
-        if self.staging_len > 0 {
-            for byte in &mut self.staging[self.staging_len..] {
-                *byte = 0xFF;
-            }
-            self.staging_len = 0;
-            self.flush_word().await?;
+        if self.len > 0 {
+            self.flush_sector().await?;
         }
         self.storage.mark_trial_boot(self.slot).await
     }
 }
+
+/// 4 KiB staging buffer for one whole flash sector (see [`SlotFlasher`]).
+static SECTOR_BUF: StaticCell<[u8; FLASH_SECTOR_SIZE as usize]> = StaticCell::new();
 
 /// Waits for [`OTA_TRIGGER`] and runs one update check per signal.
 ///
@@ -167,6 +149,7 @@ pub async fn ota_task(stack: Stack<'static>, rng: esp_hal::rng::Rng) -> ! {
     let rec_read = REC_READ.init([0; RECORD_BYTES]);
     let rec_write = REC_WRITE.init([0; WRITE_RECORD_BYTES]);
     let leftover = READ_BUF.init([0; READ_CHUNK]);
+    let sector_buf = SECTOR_BUF.init([0; FLASH_SECTOR_SIZE as usize]);
 
     let mut storage = EspFlashStorage::new();
 
@@ -181,6 +164,7 @@ pub async fn ota_task(stack: Stack<'static>, rng: esp_hal::rng::Rng) -> ! {
             &mut *rec_read,
             &mut *rec_write,
             &mut *leftover,
+            &mut *sector_buf,
         )
         .await
         {
@@ -204,6 +188,7 @@ async fn check_and_update(
     rec_read: &mut [u8],
     rec_write: &mut [u8],
     leftover: &mut [u8],
+    sector_buf: &mut [u8],
 ) -> Result<(), OtaError> {
     stack.wait_config_up().await;
 
@@ -306,7 +291,7 @@ async fn check_and_update(
     println!("OTA: bin status={} len={}", head.status, len);
 
     let passive = storage.passive_slot().await;
-    let mut flasher = SlotFlasher::new(storage, passive);
+    let mut flasher = SlotFlasher::new(storage, passive, sector_buf);
 
     let result = {
         let mut body = HttpBody {
