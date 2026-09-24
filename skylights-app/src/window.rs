@@ -14,6 +14,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};
 use esp_hal::gpio::Output;
 use esp_hal::sync::RawMutex;
+use esp_println::println;
 use skylights_core::window::{Actuation, PULSE_HIGH_MS, PULSE_LOW_MS, PULSE_SETTLE_MS};
 use skylights_core::{Position, WindowPositioner};
 
@@ -84,13 +85,14 @@ impl<'d> WindowPins<'d> {
 
 /// Drives one window's actuation lines, emitting active-low pulse sequences.
 pub struct WindowDriver<'d> {
+    id: usize,
     pins: WindowPins<'d>,
 }
 
 impl<'d> WindowDriver<'d> {
-    /// Creates a driver over the given pin set.
-    pub const fn new(pins: WindowPins<'d>) -> Self {
-        Self { pins }
+    /// Creates a driver over the given window id and pin set.
+    pub const fn new(id: usize, pins: WindowPins<'d>) -> Self {
+        Self { id, pins }
     }
 
     /// Emits the actuation pulse sequence for `actuation`.
@@ -98,24 +100,45 @@ impl<'d> WindowDriver<'d> {
     /// Holds [`ACTUATION_LOCK`] for the whole sequence so two windows can never
     /// pulse at once. The selected pin runs two 75 ms low / 75 ms high pulses
     /// followed by a 400 ms settle, and is left high (inactive) afterwards.
+    ///
+    /// The measured low/high/settle durations are logged after the sequence so
+    /// the log write cannot perturb the timings it reports (bench evidence).
     pub async fn actuate(&mut self, actuation: Actuation) {
         let _guard = ACTUATION_LOCK.lock().await;
 
+        let name = match actuation {
+            Actuation::Open => "open",
+            Actuation::Close => "close",
+            Actuation::Stop => "stop",
+        };
         let pin = match actuation {
             Actuation::Open => &mut self.pins.open,
             Actuation::Close => &mut self.pins.close,
             Actuation::Stop => &mut self.pins.stop,
         };
 
-        pin.set_low();
-        Timer::after(Duration::from_millis(PULSE_LOW_MS)).await;
-        pin.set_high();
-        Timer::after(Duration::from_millis(PULSE_HIGH_MS)).await;
-        pin.set_low();
-        Timer::after(Duration::from_millis(PULSE_LOW_MS)).await;
-        pin.set_high();
-        Timer::after(Duration::from_millis(PULSE_HIGH_MS)).await;
+        let mut low_ms = [0u64; 2];
+        let mut high_ms = [0u64; 2];
+        for i in 0..2 {
+            let low_start = Instant::now();
+            pin.set_low();
+            Timer::after(Duration::from_millis(PULSE_LOW_MS)).await;
+            low_ms[i] = low_start.elapsed().as_millis();
+
+            let high_start = Instant::now();
+            pin.set_high();
+            Timer::after(Duration::from_millis(PULSE_HIGH_MS)).await;
+            high_ms[i] = high_start.elapsed().as_millis();
+        }
+
+        let settle_start = Instant::now();
         Timer::after(Duration::from_millis(PULSE_SETTLE_MS)).await;
+        let settle_ms = settle_start.elapsed().as_millis();
+
+        println!(
+            "WINDOW {}: actuation={} pulses=2 low_ms={},{} high_ms={},{} settle_ms={}",
+            self.id, name, low_ms[0], low_ms[1], high_ms[0], high_ms[1], settle_ms
+        );
     }
 }
 
@@ -180,6 +203,13 @@ impl<'d> WindowController<'d> {
             };
             self.record_state().await;
             self.driver.actuate(plan.actuation).await;
+            println!(
+                "WINDOW {}: travel start target={} planned_ms={} stop_after={}",
+                self.id,
+                plan.target.percent(),
+                plan.travel_ms,
+                plan.stop_after
+            );
 
             let start = Instant::now();
             match select(
@@ -189,11 +219,19 @@ impl<'d> WindowController<'d> {
             .await
             {
                 Either::First(()) => {
+                    let travel_ms = start.elapsed().as_millis();
                     if plan.stop_after {
                         self.driver.actuate(Actuation::Stop).await;
                     }
                     self.positioner.finish();
                     self.record_state().await;
+                    println!(
+                        "WINDOW {}: travel end actual_ms={} stop_pulse={} position={}",
+                        self.id,
+                        travel_ms,
+                        plan.stop_after,
+                        self.positioner.position().percent()
+                    );
                     return;
                 }
                 Either::Second(WindowCommand::Stop) => {
@@ -201,6 +239,12 @@ impl<'d> WindowController<'d> {
                     self.driver.actuate(Actuation::Stop).await;
                     self.positioner.stop(elapsed);
                     self.record_state().await;
+                    println!(
+                        "WINDOW {}: travel interrupted elapsed_ms={} stop_pulse=true position={}",
+                        self.id,
+                        elapsed,
+                        self.positioner.position().percent()
+                    );
                     return;
                 }
                 Either::Second(WindowCommand::SetTarget(next)) => {
@@ -208,6 +252,12 @@ impl<'d> WindowController<'d> {
                     self.driver.actuate(Actuation::Stop).await;
                     self.positioner.stop(elapsed);
                     self.record_state().await;
+                    println!(
+                        "WINDOW {}: travel interrupted (retarget) elapsed_ms={} stop_pulse=true position={}",
+                        self.id,
+                        elapsed,
+                        self.positioner.position().percent()
+                    );
                     target = next;
                 }
             }
@@ -217,8 +267,9 @@ impl<'d> WindowController<'d> {
 
 /// Runs the controller task for the window identified by `id`.
 #[task(pool_size = 3)]
-pub async fn window_task(id: usize, driver: WindowDriver<'static>) -> ! {
+pub async fn window_task(id: usize, pins: WindowPins<'static>) -> ! {
     let receiver = WINDOW_COMMANDS[id].receiver();
+    let driver = WindowDriver::new(id, pins);
     WindowController::new(id, WindowPositioner::new(), driver, receiver)
         .run()
         .await

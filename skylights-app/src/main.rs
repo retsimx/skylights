@@ -120,15 +120,9 @@ async fn main(spawner: Spawner) {
         gpio_safe
     );
 
-    spawner
-        .spawn(window::window_task(0, window::WindowDriver::new(w1)))
-        .unwrap();
-    spawner
-        .spawn(window::window_task(1, window::WindowDriver::new(w2)))
-        .unwrap();
-    spawner
-        .spawn(window::window_task(2, window::WindowDriver::new(w3)))
-        .unwrap();
+    spawner.spawn(window::window_task(0, w1)).unwrap();
+    spawner.spawn(window::window_task(1, w2)).unwrap();
+    spawner.spawn(window::window_task(2, w3)).unwrap();
 
     println!(
         "Window controller tasks spawned ({} windows)",

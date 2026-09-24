@@ -13,9 +13,9 @@ esp-wifi = { workspace = true }
 esp-alloc = { workspace = true }
 esp-backtrace = { workspace = true }
 esp-println = { workspace = true }
-esp-storage = { version = "0.4.0", default-features = false, features = ["esp32", "nor-flash"] }
+esp-storage = { version = "0.4.0", default-features = false, features = ["esp32", "nor-flash", "critical-section"] }
 esp-hal-embassy = { version = "0.6.0", features = ["esp32"] }
-embassy-executor = { workspace = true, features = ["task-arena-size-8192"] }
+embassy-executor = { workspace = true, features = ["task-arena-size-16384"] }
 embassy-time = { workspace = true }
 embassy-sync = { workspace = true }
 static_cell = { workspace = true }
