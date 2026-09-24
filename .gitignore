@@ -3,3 +3,4 @@ secrets.py
 venv
 /target
 skylights-app/src/secrets.rs
+/.env.deploy
