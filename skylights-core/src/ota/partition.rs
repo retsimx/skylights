@@ -432,6 +432,13 @@ pub trait OtaStorage {
 
     /// Confirms current slot operation, marking it `ESP_OTA_IMG_VALID` and cancelling rollback.
     async fn mark_valid(&mut self) -> Result<(), FlashError>;
+
+    /// Marks the current active slot `ESP_OTA_IMG_INVALID` so the bootloader
+    /// will fall back to the other slot on the next reset.
+    ///
+    /// Used by the post-swap self-test to force a rollback when a trial image
+    /// fails, independent of the bootloader's `APP_ROLLBACK` configuration.
+    async fn mark_invalid(&mut self) -> Result<(), FlashError>;
 }
 
 /// In-memory mock implementing [`OtaStorage`] for deterministic host-side testing.
@@ -581,6 +588,23 @@ impl OtaStorage for MockOtaStorage {
 
         // Write updated valid entry
         let entry = EspOtaSelectEntry::new_valid(res.active_seq);
+        self.write_sector_entry(target_sector, &entry);
+        Ok(())
+    }
+
+    async fn mark_invalid(&mut self) -> Result<(), FlashError> {
+        let res = self.resolution();
+        let target_sector = res.active_sector;
+
+        // Clear target sector (erase to 0xFF)
+        let sector_offset = target_sector.offset_in_partition() as usize;
+        self.otadata[sector_offset..sector_offset + FLASH_SECTOR_SIZE as usize].fill(0xFF);
+
+        // Write an INVALID entry for the same sequence so arbitration falls
+        // back to the other slot.
+        let mut entry = EspOtaSelectEntry::new_valid(res.active_seq);
+        entry.ota_state = ESP_OTA_IMG_INVALID;
+        entry.crc = entry.compute_crc();
         self.write_sector_entry(target_sector, &entry);
         Ok(())
     }
@@ -816,6 +840,22 @@ mod tests {
         // Active slot must roll back to Ota1!
         assert_eq!(block_on(storage.active_slot()), Slot::Ota1);
         assert_eq!(block_on(storage.passive_slot()), Slot::Ota0);
+    }
+
+    #[test]
+    fn test_mark_invalid_forces_rollback() {
+        let mut storage = MockOtaStorage::new();
+
+        // Trial-boot ota_1 from a valid ota_0.
+        block_on(storage.mark_trial_boot(Slot::Ota1)).unwrap();
+        assert_eq!(block_on(storage.active_slot()), Slot::Ota1);
+        assert!(storage.resolution().is_trial);
+
+        // Self-test failure marks the running slot invalid; arbitration must
+        // fall back to the other slot on the next reset.
+        block_on(storage.mark_invalid()).unwrap();
+        assert_eq!(block_on(storage.active_slot()), Slot::Ota0);
+        assert!(!storage.resolution().is_trial);
     }
 
     #[test]

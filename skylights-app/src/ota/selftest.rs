@@ -114,6 +114,12 @@ pub async fn self_test_task(mut wdt: Wdt<esp_hal::peripherals::TIMG1>, gpio_safe
             }
             SelfTestVerdict::Failed(reason) => {
                 println!("SELF-TEST: failed reason={}", reason);
+                // Force a rollback: mark the running slot INVALID so the
+                // bootloader boots the other slot, independent of its
+                // APP_ROLLBACK configuration.
+                if let Err(e) = storage.mark_invalid().await {
+                    println!("SELF-TEST: mark_invalid failed {:?}", e);
+                }
                 software_reset();
                 return;
             }
