@@ -80,10 +80,12 @@ pub async fn self_test_task(mut wdt: Wdt<esp_hal::peripherals::TIMG1>, gpio_safe
 
     let Some(mut wifi) = crate::net::WIFI_CONNECTED.receiver() else {
         println!("SELF-TEST: WIFI_CONNECTED has no free receiver slot, resetting");
+        software_reset();
         return;
     };
     let Some(mut mqtt) = crate::mqtt::MQTT_HEALTHY.receiver() else {
         println!("SELF-TEST: MQTT_HEALTHY has no free receiver slot, resetting");
+        software_reset();
         return;
     };
 
