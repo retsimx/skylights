@@ -5,7 +5,7 @@ use embedded_storage::nor_flash::{NorFlash, ReadNorFlash};
 use esp_storage::FlashStorage;
 use skylights_core::ota::{
     next_seq_for_slot, resolve_active_slot, EspOtaSelectEntry, FlashError, OtaStorage,
-    OtadataResolution, OtadataSector, Slot, FLASH_SECTOR_SIZE,
+    OtadataResolution, OtadataSector, Slot, ESP_OTA_IMG_INVALID, FLASH_SECTOR_SIZE,
 };
 
 /// Hardware SPI flash storage driver for ESP32 OTA updates.
@@ -151,6 +151,32 @@ impl OtaStorage for EspFlashStorage {
 
         // 2. Prepare confirmed valid entry
         let entry = EspOtaSelectEntry::new_valid(res.active_seq);
+        let bytes = entry.to_bytes();
+
+        // 3. Write entry to beginning of sector
+        flash
+            .write(sector_addr, &bytes)
+            .map_err(|_| FlashError::WriteError)?;
+
+        Ok(())
+    }
+
+    async fn mark_invalid(&mut self) -> Result<(), FlashError> {
+        let res = self.resolve_otadata()?;
+        let target_sector = res.active_sector;
+        let sector_addr = target_sector.flash_offset();
+        let mut flash = self.flash.borrow_mut();
+
+        // 1. Erase target sector (4096 bytes)
+        flash
+            .erase(sector_addr, sector_addr + FLASH_SECTOR_SIZE)
+            .map_err(|_| FlashError::EraseError)?;
+
+        // 2. Prepare an INVALID entry for the same sequence so arbitration falls
+        //    back to the other slot.
+        let mut entry = EspOtaSelectEntry::new_valid(res.active_seq);
+        entry.ota_state = ESP_OTA_IMG_INVALID;
+        entry.crc = entry.compute_crc();
         let bytes = entry.to_bytes();
 
         // 3. Write entry to beginning of sector
