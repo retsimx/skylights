@@ -19,7 +19,7 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::watch::{Receiver as WatchReceiver, Watch};
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Ticker, Timer};
 use esp_hal::efuse::Efuse;
 use esp_println::println;
 use minimq::{Buffers, ConfigBuilder, ConnectEvent, Connection, Publication, Session, TopicFilter};
@@ -41,6 +41,12 @@ use crate::window::{WindowCommand, WindowSnapshot, STATE_CHANGED, WINDOW_COMMAND
 
 /// Advertised MQTT keepalive, in seconds.
 const KEEPALIVE_SECS: u16 = 60;
+
+/// Upper bound on one TCP connect / MQTT handshake attempt.
+///
+/// Without this, an unroutable broker (a SYN with no reply) blocks the task
+/// forever: no failure is recorded, so no reconnect backoff and no rejoin.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Telemetry heartbeat period, in seconds.
 const HEARTBEAT_SECS: u64 = 60;
@@ -151,15 +157,18 @@ async fn serve_connection(
 
     socket.abort();
     let endpoint = SocketAddrV4::new(address, port);
-    if socket.connect(endpoint).await.is_err() {
+    if !matches!(
+        with_timeout(CONNECT_TIMEOUT, socket.connect(endpoint)).await,
+        Ok(Ok(()))
+    ) {
         println!("MQTT: TCP connect to {endpoint} failed");
         note_failure(rejoin);
         return false;
     }
 
-    let mut connection = match session.connect(&mut *socket).await {
-        Ok(connection) => connection,
-        Err(_) => {
+    let mut connection = match with_timeout(CONNECT_TIMEOUT, session.connect(&mut *socket)).await {
+        Ok(Ok(connection)) => connection,
+        _ => {
             println!("MQTT: broker handshake failed, retrying");
             note_failure(rejoin);
             return false;
