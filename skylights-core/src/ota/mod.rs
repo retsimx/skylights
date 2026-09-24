@@ -8,6 +8,7 @@
 
 pub mod http;
 pub mod partition;
+pub mod selftest;
 pub mod session;
 
 pub use partition::{
@@ -17,6 +18,8 @@ pub use partition::{
     ESP_OTA_IMG_UNDEFINED, ESP_OTA_IMG_VALID, FLASH_SECTOR_SIZE, OTADATA_OFFSET, OTADATA_SIZE,
     OTA_0_OFFSET, OTA_1_OFFSET, OTA_SLOT_SIZE,
 };
+
+pub use selftest::{Clock, SelfTestSignals, SelfTestTracker, SelfTestVerdict, SELF_TEST_WINDOW_MS};
 
 /// Size of one streaming OTA download chunk (4 KiB).
 pub const CHUNK_BYTES: usize = 4096;

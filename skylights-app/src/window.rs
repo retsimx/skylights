@@ -75,6 +75,11 @@ impl<'d> WindowPins<'d> {
     pub const fn new(open: Output<'d>, stop: Output<'d>, close: Output<'d>) -> Self {
         Self { open, stop, close }
     }
+
+    /// Returns true when all three outputs are in their inactive (HIGH) state.
+    pub fn all_inactive(&self) -> bool {
+        self.open.is_set_high() && self.stop.is_set_high() && self.close.is_set_high()
+    }
 }
 
 /// Drives one window's actuation lines, emitting active-low pulse sequences.

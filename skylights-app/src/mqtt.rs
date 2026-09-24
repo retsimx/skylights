@@ -18,7 +18,7 @@ use embassy_futures::select::{select3, Either3};
 use embassy_net::tcp::TcpSocket;
 use embassy_net::Stack;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::watch::Receiver as WatchReceiver;
+use embassy_sync::watch::{Receiver as WatchReceiver, Watch};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use esp_hal::efuse::Efuse;
 use esp_println::println;
@@ -66,6 +66,9 @@ static MQTT_TX: StaticCell<[u8; 1024]> = StaticCell::new();
 
 /// Storage backing the `&'static str` client identifier.
 static CLIENT_ID_BYTES: StaticCell<[u8; 32]> = StaticCell::new();
+
+/// True while a live MQTT session has completed CONNECT + SUBACK on `skylight/+`.
+pub static MQTT_HEALTHY: Watch<CriticalSectionRawMutex, bool, 2> = Watch::new();
 
 /// An owned command derived from an inbound publish.
 ///
@@ -134,6 +137,9 @@ async fn serve_connection(
     stack: Stack<'static>,
     boot: Instant,
 ) -> bool {
+    // Any new serve attempt starts unhealthy until CONNECT + SUBACK succeeds.
+    MQTT_HEALTHY.sender().send(false);
+
     let Some(address) = net::resolve(stack, secrets::MQTT_HOST).await else {
         println!("MQTT: DNS lookup failed for {}", secrets::MQTT_HOST);
         return false;
@@ -158,7 +164,13 @@ async fn serve_connection(
         return false;
     }
 
+    // CONNECT + SUBACK on `skylight/+` succeeded: the session is live.
+    MQTT_HEALTHY.sender().send(true);
+
     run_connection(&mut connection, boot).await;
+
+    // The established connection is gone; the session is no longer live.
+    MQTT_HEALTHY.sender().send(false);
     println!("MQTT: connection lost, reconnecting");
     true
 }
