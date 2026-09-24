@@ -166,6 +166,14 @@ mod tests {
     }
 
     #[test]
+    fn gpio_unsafe_fails_even_if_network_and_mqtt_healthy() {
+        let clock = MockClock::new(0);
+        let mut tracker = SelfTestTracker::new(0, false);
+        tracker.observe(true, true);
+        assert_eq!(tracker.evaluate(&clock), SelfTestVerdict::Failed("gpio"));
+    }
+
+    #[test]
     fn all_signals_true_exactly_at_window_passes() {
         let mut clock = MockClock::new(0);
         let mut tracker = SelfTestTracker::new(0, true);
