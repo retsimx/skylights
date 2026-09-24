@@ -34,9 +34,6 @@ pub const TOPIC_STATE: &str = "skylight/state";
 /// Subscription wildcard covering every `skylight/*` command topic.
 pub const TOPIC_WILDCARD: &str = "skylight/+";
 
-/// Version reported in the `version` field of [`StateMessage`].
-pub const STATE_VERSION: u8 = 1;
-
 /// A window index in the inclusive range `1..=3`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Index(u8);
@@ -119,8 +116,8 @@ pub struct WindowTelemetry {
 pub struct StateMessage {
     /// State of each of the three windows.
     pub windows: [WindowTelemetry; 3],
-    /// Protocol version, currently [`STATE_VERSION`].
-    pub version: u8,
+    /// Running firmware build version (`SKYLIGHTS_BUILD_VERSION`).
+    pub version: u32,
     /// Connected-AP RSSI in dBm; placeholder `0` means "unknown".
     pub wifi_rssi: i8,
     /// Seconds elapsed since boot.
@@ -349,7 +346,7 @@ mod tests {
                     moving: false,
                 },
             ],
-            version: STATE_VERSION,
+            version: 42,
             wifi_rssi: -65,
             uptime_secs: 120,
         };
@@ -360,7 +357,7 @@ mod tests {
             r#"{"index":1,"percentage":0,"moving":false},"#,
             r#"{"index":2,"percentage":50,"moving":false},"#,
             r#"{"index":3,"percentage":100,"moving":false}],"#,
-            r#""version":1,"wifi_rssi":-65,"uptime_secs":120}"#
+            r#""version":42,"wifi_rssi":-65,"uptime_secs":120}"#
         );
         assert_eq!(&out[..len], expected.as_bytes());
     }
@@ -385,7 +382,7 @@ mod tests {
                     moving: true,
                 },
             ],
-            version: STATE_VERSION,
+            version: 42,
             wifi_rssi: 0,
             uptime_secs: 1,
         };
@@ -396,7 +393,7 @@ mod tests {
             r#"{"index":1,"percentage":10,"moving":true},"#,
             r#"{"index":2,"percentage":20,"moving":false},"#,
             r#"{"index":3,"percentage":30,"moving":true}],"#,
-            r#""version":1,"wifi_rssi":0,"uptime_secs":1}"#
+            r#""version":42,"wifi_rssi":0,"uptime_secs":1}"#
         );
         assert_eq!(&out[..len], expected.as_bytes());
     }
@@ -418,7 +415,7 @@ mod tests {
                 percentage: 0,
                 moving: false,
             }; 3],
-            version: STATE_VERSION,
+            version: 42,
             wifi_rssi: 0,
             uptime_secs: 0,
         };
@@ -449,6 +446,5 @@ mod tests {
         assert_eq!(TOPIC_GET_RESPONSE, "skylight/get/response");
         assert_eq!(TOPIC_STATE, "skylight/state");
         assert_eq!(TOPIC_WILDCARD, "skylight/+");
-        assert_eq!(STATE_VERSION, 1);
     }
 }

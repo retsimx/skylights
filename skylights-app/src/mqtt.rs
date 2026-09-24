@@ -27,12 +27,14 @@ use static_cell::StaticCell;
 
 use skylights_core::mqtt::{
     format_get_response, format_state, parse_get, parse_reset, parse_set, parse_stop, Index,
-    Percentage, StateMessage, WindowTelemetry, STATE_VERSION, TOPIC_GET, TOPIC_GET_RESPONSE,
-    TOPIC_RESET, TOPIC_SET, TOPIC_STATE, TOPIC_STOP, TOPIC_WILDCARD,
+    Percentage, StateMessage, WindowTelemetry, TOPIC_GET, TOPIC_GET_RESPONSE, TOPIC_RESET,
+    TOPIC_SET, TOPIC_STATE, TOPIC_STOP, TOPIC_WILDCARD,
 };
+use skylights_core::version::parse_version;
+use skylights_core::wifi::RejoinCounter;
 use skylights_core::{LinkState, Position, ReconnectBackoff};
 
-use crate::net::{self, WIFI_CONNECTED};
+use crate::net::{WIFI_CONNECTED, WIFI_REJOIN};
 use crate::ota::OTA_TRIGGER;
 use crate::secrets;
 use crate::window::{WindowCommand, WindowSnapshot, STATE_CHANGED, WINDOW_COMMANDS, WINDOW_STATES};
@@ -117,9 +119,10 @@ pub async fn mqtt_task(stack: Stack<'static>) -> ! {
     println!("MQTT: starting with client id {client_id}");
 
     let mut backoff = ReconnectBackoff::new();
+    let mut rejoin = RejoinCounter::new();
     loop {
         wait_for_link(&mut link).await;
-        if serve_connection(&mut session, &mut socket, stack, boot).await {
+        if serve_connection(&mut session, &mut socket, boot, &mut rejoin).await {
             backoff.reset();
         }
         Timer::after(Duration::from_millis(backoff.next_delay_ms())).await;
@@ -134,21 +137,23 @@ pub async fn mqtt_task(stack: Stack<'static>) -> ! {
 async fn serve_connection(
     session: &mut Session<'static>,
     socket: &mut TcpSocket<'static>,
-    stack: Stack<'static>,
     boot: Instant,
+    rejoin: &mut RejoinCounter,
 ) -> bool {
     // Any new serve attempt starts unhealthy until CONNECT + SUBACK succeeds.
     MQTT_HEALTHY.sender().send(false);
 
-    let Some(address) = net::resolve(stack, secrets::MQTT_HOST).await else {
-        println!("MQTT: DNS lookup failed for {}", secrets::MQTT_HOST);
+    let Some((address, port)) = skylights_core::parse_broker(secrets::MQTT_BROKER) else {
+        println!("MQTT: invalid MQTT_BROKER (expected mqtt://<ipv4>[:port])");
+        note_failure(rejoin);
         return false;
     };
 
     socket.abort();
-    let endpoint = SocketAddrV4::new(address, secrets::MQTT_PORT);
+    let endpoint = SocketAddrV4::new(address, port);
     if socket.connect(endpoint).await.is_err() {
         println!("MQTT: TCP connect to {endpoint} failed");
+        note_failure(rejoin);
         return false;
     }
 
@@ -156,16 +161,19 @@ async fn serve_connection(
         Ok(connection) => connection,
         Err(_) => {
             println!("MQTT: broker handshake failed, retrying");
+            note_failure(rejoin);
             return false;
         }
     };
 
     if !subscribe_if_fresh(&mut connection).await {
+        note_failure(rejoin);
         return false;
     }
 
     // CONNECT + SUBACK on `skylight/+` succeeded: the session is live.
     MQTT_HEALTHY.sender().send(true);
+    rejoin.success();
 
     run_connection(&mut connection, boot).await;
 
@@ -175,35 +183,41 @@ async fn serve_connection(
     true
 }
 
-/// Builds `skylights-<4 hex of MAC[4],MAC[5]>` into `storage`.
+/// Records a failed MQTT connect attempt. After enough consecutive failures the
+/// link is assumed associated-but-dead and a Wi-Fi rejoin is requested, since
+/// the link state alone never reports that condition.
+fn note_failure(rejoin: &mut RejoinCounter) {
+    if rejoin.failure() {
+        println!("MQTT: repeated connect failures; requesting Wi-Fi rejoin");
+        WIFI_REJOIN.signal(());
+    }
+}
+
+/// Builds `skylights-<12 hex of the full MAC>` into `storage`.
+///
+/// A unique client id per device: a shared id makes the broker kick one device
+/// off whenever another connects. Matches the sibling firmware's scheme.
 fn build_client_id(storage: &'static mut [u8; 32]) -> &'static str {
     const PREFIX: &[u8] = b"skylights-";
     const HEX: &[u8; 16] = b"0123456789abcdef";
 
     let mac = Efuse::mac_address();
     storage[..PREFIX.len()].copy_from_slice(PREFIX);
-    storage[PREFIX.len()] = HEX[(mac[4] >> 4) as usize];
-    storage[PREFIX.len() + 1] = HEX[(mac[4] & 0x0f) as usize];
-    storage[PREFIX.len() + 2] = HEX[(mac[5] >> 4) as usize];
-    storage[PREFIX.len() + 3] = HEX[(mac[5] & 0x0f) as usize];
+    for (i, byte) in mac.iter().enumerate() {
+        storage[PREFIX.len() + 2 * i] = HEX[(byte >> 4) as usize];
+        storage[PREFIX.len() + 2 * i + 1] = HEX[(byte & 0x0f) as usize];
+    }
 
-    core::str::from_utf8(&storage[..PREFIX.len() + 4]).unwrap_or("skylights")
+    core::str::from_utf8(&storage[..PREFIX.len() + 12]).unwrap_or("skylights")
 }
 
-/// Builds the minimq configuration, adding auth only when configured.
+/// Builds the minimq configuration (anonymous; the canonical broker has no auth).
 fn build_config<'a>(rx: &'a mut [u8], tx: &'a mut [u8], client_id: &str) -> ConfigBuilder<'a> {
-    let builder = ConfigBuilder::new(Buffers::new(rx, tx))
+    ConfigBuilder::new(Buffers::new(rx, tx))
         .client_id(client_id)
         .expect("client id fits in minimq storage")
         .keepalive_interval(KEEPALIVE_SECS)
-        .session_expiry_interval(0);
-
-    match secrets::MQTT_USER {
-        Some(user) => builder
-            .auth(user, secrets::MQTT_PASSWORD.unwrap_or("").as_bytes())
-            .expect("auth configured once"),
-        None => builder,
-    }
+        .session_expiry_interval(0)
 }
 
 /// Blocks until the Wi-Fi supervisor reports [`LinkState::Connected`].
@@ -394,7 +408,7 @@ async fn build_state(boot: Instant) -> StateMessage {
             snapshot_telemetry(2, snapshots[1]),
             snapshot_telemetry(3, snapshots[2]),
         ],
-        version: STATE_VERSION,
+        version: parse_version(env!("SKYLIGHTS_BUILD_VERSION")).unwrap_or(0),
         wifi_rssi: WIFI_RSSI_PLACEHOLDER,
         uptime_secs: boot.elapsed().as_secs() as u32,
     }

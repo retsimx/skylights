@@ -17,9 +17,11 @@ use embassy_futures::select::{select, Either};
 use embassy_net::dns::{DnsQueryType, DnsSocket};
 use embassy_net::{Config, Runner, Stack, StackResources};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::signal::Signal;
 use embassy_sync::watch::Watch;
-use embassy_time::{with_timeout, Duration, Timer};
+use embassy_time::{with_timeout, Duration, Instant, Timer};
 use esp_hal::peripherals::{RADIO_CLK, TIMG0, WIFI};
+use esp_hal::reset::software_reset;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println::println;
@@ -29,6 +31,10 @@ use esp_wifi::wifi::{
 use esp_wifi::EspWifiController;
 use static_cell::StaticCell;
 
+use skylights_core::wifi::{
+    NoIpWatchdog, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS,
+    NO_IP_REBOOT_MS,
+};
 use skylights_core::{LinkState, ReconnectBackoff};
 
 /// Latest link state, retained for late subscribers.
@@ -42,10 +48,9 @@ static WIFI_INIT: StaticCell<EspWifiController<'static>> = StaticCell::new();
 /// and [`resolve`] briefly uses one for DNS, leaving room for MQTT + OTA.
 static STACK_RESOURCES: StaticCell<StackResources<4>> = StaticCell::new();
 
-/// Upper bound on DHCP address acquisition. A stalled DHCP server must not
-/// block the supervisor forever, so the wait is abandoned and routed through
-/// the reconnect backoff like any other failed attempt.
-const DHCP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Raised by the MQTT task after repeated connect failures to force a rejoin,
+/// covering the "associated but no traffic" case the link state never reports.
+pub static WIFI_REJOIN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 /// Brings up the Wi-Fi station and embassy-net stack, spawns the network
 /// runner and the reconnect supervisor, and returns the stack handle.
@@ -108,47 +113,121 @@ async fn net_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>
     runner.run().await
 }
 
-/// Performs one association attempt and waits for a DHCP lease.
+/// Why one association attempt did not succeed.
+enum JoinFailure {
+    /// The association call did not complete within `JOIN_TIMEOUT_MS`.
+    Timeout,
+    /// The radio reported an association failure.
+    Error,
+}
+
+/// Starts the station (if needed) and performs one bounded association attempt.
 ///
-/// Returns `true` when the station is associated and the stack has an IPv4
-/// configuration; `false` on any failure (start, connect, DHCP timeout, or
-/// link loss during DHCP), in which case the caller applies the backoff.
-async fn associate(controller: &mut WifiController<'static>, stack: Stack<'static>) -> bool {
-    if !matches!(controller.is_started(), Ok(true)) && controller.start_async().await.is_err() {
-        println!("Wi-Fi: start failed, will retry");
-        return false;
-    }
-
-    // `connect_async` waits for a fresh `StaConnected`, so a station that is
-    // still associated must be disassociated first or the wait could stall.
-    if matches!(controller.is_connected(), Ok(true)) {
-        let _ = controller.disconnect_async().await;
-    }
-
-    match controller.connect_async().await {
-        Ok(()) => {
-            let dhcp = with_timeout(DHCP_TIMEOUT, stack.wait_config_up());
-            match select(
-                dhcp,
-                controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
-            )
-            .await
-            {
-                Either::First(Ok(())) => true,
-                Either::First(Err(_)) => {
-                    println!("Wi-Fi: DHCP timed out, will retry");
-                    false
-                }
-                Either::Second(_) => {
-                    println!("Wi-Fi: link lost during DHCP, will retry");
-                    false
-                }
+/// `connect_async` waits for a fresh `StaConnected`, so a station that is still
+/// associated is disconnected first; the disconnect is bounded so a stalled
+/// leave cannot wedge the supervisor.
+async fn attempt_join(controller: &mut WifiController<'static>) -> Result<(), JoinFailure> {
+    if !matches!(controller.is_started(), Ok(true)) {
+        match with_timeout(
+            Duration::from_millis(JOIN_TIMEOUT_MS),
+            controller.start_async(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            _ => {
+                println!("Wi-Fi: start failed, will retry");
+                return Err(JoinFailure::Error);
             }
         }
-        Err(_) => {
-            println!("Wi-Fi: connect failed, will retry");
-            false
+    }
+
+    if matches!(controller.is_connected(), Ok(true))
+        && with_timeout(
+            Duration::from_millis(LEAVE_TIMEOUT_MS),
+            controller.disconnect_async(),
+        )
+        .await
+        .is_err()
+    {
+        println!("Wi-Fi: disconnect did not complete; continuing");
+    }
+
+    match with_timeout(
+        Duration::from_millis(JOIN_TIMEOUT_MS),
+        controller.connect_async(),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(JoinFailure::Error),
+        Err(_) => Err(JoinFailure::Timeout),
+    }
+}
+
+/// Waits for a DHCP lease on the current association, then supervises the link.
+///
+/// DHCP is retried in place up to `DHCP_ATTEMPTS` times; the loop also returns
+/// early on a rejoin request. A lease resets the backoff and refreshes the no-IP
+/// watchdog. Returns when the link drops, a rejoin is requested, or DHCP gives
+/// up.
+async fn handle_associated(
+    controller: &mut WifiController<'static>,
+    stack: Stack<'static>,
+    backoff: &mut ReconnectBackoff,
+    watchdog: &mut NoIpWatchdog,
+) {
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match select(
+            with_timeout(
+                Duration::from_millis(DHCP_TIMEOUT_MS),
+                stack.wait_config_up(),
+            ),
+            WIFI_REJOIN.wait(),
+        )
+        .await
+        {
+            Either::First(Ok(())) => break,
+            Either::First(Err(_)) => {
+                if attempts >= DHCP_ATTEMPTS {
+                    println!("Wi-Fi: DHCP timed out, will retry");
+                    return;
+                }
+                println!("Wi-Fi: DHCP not up yet; retrying on the same association");
+            }
+            Either::Second(()) => {
+                println!("Wi-Fi: rejoin requested while awaiting DHCP");
+                return;
+            }
         }
+    }
+
+    backoff.reset();
+    WIFI_CONNECTED.sender().send(LinkState::Connected);
+    watchdog.note_ip(Instant::now().as_millis());
+    if let Some(config) = stack.config_v4() {
+        println!("Wi-Fi connected, IPv4: {}", config.address);
+    }
+
+    let dns_probe =
+        skylights_core::ota::parse_url(crate::secrets::OTA_URL, crate::secrets::OTA_PROJECT)
+            .map(|uri| uri.host)
+            .unwrap_or("");
+    match resolve(stack, dns_probe).await {
+        Some(addr) => println!("DNS resolved {} -> {}", dns_probe, addr),
+        None => println!("DNS lookup failed for {}", dns_probe),
+    }
+
+    match select(
+        controller.wait_for_events(WifiEvent::StaDisconnected.into(), false),
+        WIFI_REJOIN.wait(),
+    )
+    .await
+    {
+        Either::First(_) => println!("Wi-Fi: network link dropped"),
+        Either::Second(()) => println!("Wi-Fi: rejoin requested"),
     }
 }
 
@@ -160,33 +239,33 @@ async fn connection_task(mut controller: WifiController<'static>, stack: Stack<'
         ssid: crate::secrets::WIFI_SSID
             .try_into()
             .expect("WIFI_SSID exceeds 32 bytes"),
-        password: crate::secrets::WIFI_PASS
+        password: crate::secrets::WIFI_PASSWORD
             .try_into()
-            .expect("WIFI_PASS exceeds 64 bytes"),
+            .expect("WIFI_PASSWORD exceeds 64 bytes"),
         ..Default::default()
     });
     controller.set_configuration(&client_config).unwrap();
 
     let mut backoff = ReconnectBackoff::new();
+    let mut watchdog = NoIpWatchdog::new();
 
     loop {
         WIFI_CONNECTED.sender().send(LinkState::Connecting);
 
-        if associate(&mut controller, stack).await {
-            backoff.reset();
-            WIFI_CONNECTED.sender().send(LinkState::Connected);
-            if let Some(config) = stack.config_v4() {
-                println!("Wi-Fi connected, IPv4: {}", config.address);
+        match attempt_join(&mut controller).await {
+            Ok(()) => handle_associated(&mut controller, stack, &mut backoff, &mut watchdog).await,
+            Err(JoinFailure::Timeout) => {
+                println!("Wi-Fi: association attempt timed out, will retry")
             }
-            match resolve(stack, crate::secrets::MQTT_HOST).await {
-                Some(addr) => {
-                    println!("DNS resolved {} -> {}", crate::secrets::MQTT_HOST, addr)
-                }
-                None => println!("DNS lookup failed for {}", crate::secrets::MQTT_HOST),
-            }
-            let _ = controller
-                .wait_for_events(WifiEvent::StaDisconnected.into(), false)
-                .await;
+            Err(JoinFailure::Error) => println!("Wi-Fi: connect failed, will retry"),
+        }
+
+        if watchdog.reboot_due(Instant::now().as_millis()) {
+            println!(
+                "Wi-Fi: no IP for {}s; resetting to recover the radio",
+                NO_IP_REBOOT_MS / 1000
+            );
+            software_reset();
         }
 
         WIFI_CONNECTED.sender().send(LinkState::Disconnected);

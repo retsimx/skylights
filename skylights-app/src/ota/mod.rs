@@ -43,18 +43,10 @@ const NAME_MAX_BYTES: usize = 48;
 
 /// Writes a streamed image into one passive slot through [`OtaStorage`].
 ///
-/// [`apply_update`] calls [`Flasher::write`] with strictly increasing offsets,
-/// so a simple `next_erased_sector` watermark is sound: the sector containing
-/// the current write is erased the first time it is touched, and every later
-/// write lies in that sector or a later one. Each 4-byte word is written at a
-/// 4-byte-aligned offset with a 4-byte length, satisfying the ESP32 flash
-/// alignment rule; a final short word is padded with `0xFF` in
-/// [`Flasher::mark_updated`].
-///
-/// [`Flasher::write`] ignores its `offset` argument and advances an internal
-/// `write_offset` instead. This is sound only because [`apply_update`] always
-/// writes contiguously from 0; a non-contiguous caller would corrupt the
-/// image.
+/// [`apply_update`] writes strictly increasing offsets, so a single
+/// `next_erased_sector` watermark is sound. Whole aligned words are written
+/// straight through (one flash call per chunk) and only a <4-byte tail is
+/// staged; the ESP32 flash word is 4 bytes.
 struct SlotFlasher<'a> {
     storage: &'a mut EspFlashStorage,
     slot: Slot,
@@ -62,10 +54,10 @@ struct SlotFlasher<'a> {
     staging: [u8; 4],
     staging_len: usize,
     write_offset: u32,
+    next_log: u32,
 }
 
 impl<'a> SlotFlasher<'a> {
-    /// Creates a flasher targeting `slot` in `storage`.
     fn new(storage: &'a mut EspFlashStorage, slot: Slot) -> Self {
         Self {
             storage,
@@ -74,19 +66,32 @@ impl<'a> SlotFlasher<'a> {
             staging: [0; 4],
             staging_len: 0,
             write_offset: 0,
+            next_log: 128 * 1024,
         }
     }
 
-    /// Erases the current word's sector if it has not been erased yet, then
-    /// writes the staged word and advances to the next aligned offset.
-    async fn flush_word(&mut self) -> Result<(), FlashError> {
-        let sector = self.write_offset / FLASH_SECTOR_SIZE;
-        if sector >= self.next_erased_sector {
-            self.storage
-                .erase_range(self.slot, sector * FLASH_SECTOR_SIZE, FLASH_SECTOR_SIZE)
-                .await?;
-            self.next_erased_sector = sector + 1;
+    /// Erases every sector overlapping `[offset, offset + len)` not yet erased.
+    async fn ensure_erased(&mut self, offset: u32, len: u32) -> Result<(), FlashError> {
+        if len == 0 {
+            return Ok(());
         }
+        let last = (offset + len - 1) / FLASH_SECTOR_SIZE;
+        while self.next_erased_sector <= last {
+            self.storage
+                .erase_range(
+                    self.slot,
+                    self.next_erased_sector * FLASH_SECTOR_SIZE,
+                    FLASH_SECTOR_SIZE,
+                )
+                .await?;
+            self.next_erased_sector += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes the staged <4-byte tail as one padded word and advances.
+    async fn flush_word(&mut self) -> Result<(), FlashError> {
+        self.ensure_erased(self.write_offset, 4).await?;
         self.storage
             .write_chunk(self.slot, self.write_offset, &self.staging)
             .await?;
@@ -107,13 +112,32 @@ impl Flasher for SlotFlasher<'_> {
     type Error = FlashError;
 
     async fn write(&mut self, _offset: usize, data: &[u8]) -> Result<(), Self::Error> {
-        for &byte in data {
-            self.staging[self.staging_len] = byte;
+        let mut data = data;
+        while self.staging_len > 0 && !data.is_empty() {
+            self.staging[self.staging_len] = data[0];
             self.staging_len += 1;
+            data = &data[1..];
             if self.staging_len == 4 {
                 self.staging_len = 0;
                 self.flush_word().await?;
             }
+        }
+        let aligned = data.len() - (data.len() % 4);
+        if aligned > 0 {
+            self.ensure_erased(self.write_offset, aligned as u32)
+                .await?;
+            self.storage
+                .write_chunk(self.slot, self.write_offset, &data[..aligned])
+                .await?;
+            self.write_offset += aligned as u32;
+            if self.write_offset >= self.next_log {
+                println!("OTA: wrote {} KiB", self.write_offset / 1024);
+                self.next_log = self.write_offset + 128 * 1024;
+            }
+        }
+        for &byte in &data[aligned..] {
+            self.staging[self.staging_len] = byte;
+            self.staging_len += 1;
         }
         Ok(())
     }
@@ -183,7 +207,7 @@ async fn check_and_update(
 ) -> Result<(), OtaError> {
     stack.wait_config_up().await;
 
-    let uri = parse_url(secrets::OTA_BASE_URL, secrets::OTA_PROJECT).map_err(|_| {
+    let uri = parse_url(secrets::OTA_URL, secrets::OTA_PROJECT).map_err(|_| {
         println!("OTA: invalid base url");
         OtaError::Url
     })?;
@@ -293,9 +317,6 @@ async fn check_and_update(
     };
 
     if let Err(error) = result {
-        // Only a hash mismatch leaves a full-length body that could look like a
-        // complete image; other failures leave `otadata` untouched (the passive
-        // slot is not selectable) and the next attempt erases lazily.
         if matches!(error, UpdateError::HashMismatch) {
             println!("OTA: hash mismatch, erasing passive header");
             let _ = flasher.abort().await;

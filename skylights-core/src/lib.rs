@@ -22,15 +22,23 @@ pub mod mqtt;
 pub use mqtt::{
     format_get_response, format_state, parse_get, parse_reset, parse_set, parse_stop, GetCommand,
     Index, MqttError, Percentage, SetCommand, StateMessage, StopCommand, WindowTelemetry,
-    STATE_VERSION, TOPIC_GET, TOPIC_GET_RESPONSE, TOPIC_RESET, TOPIC_SET, TOPIC_STATE, TOPIC_STOP,
-    TOPIC_WILDCARD,
+    TOPIC_GET, TOPIC_GET_RESPONSE, TOPIC_RESET, TOPIC_SET, TOPIC_STATE, TOPIC_STOP, TOPIC_WILDCARD,
 };
 
 pub mod version;
 pub use version::{parse_version, VersionError};
 
+pub mod wifi;
+pub use wifi::{
+    NoIpWatchdog, RejoinCounter, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS,
+    MQTT_REJOIN_FAILURES, NO_IP_REBOOT_MS,
+};
+
 pub mod net;
-pub use net::{LinkState, ReconnectBackoff, BACKOFF_FACTOR, BACKOFF_INITIAL_MS, BACKOFF_MAX_MS};
+pub use net::{
+    parse_broker, LinkState, ReconnectBackoff, BACKOFF_FACTOR, BACKOFF_INITIAL_MS, BACKOFF_MAX_MS,
+    BROKER_PORT,
+};
 
 pub mod window;
 pub use window::{

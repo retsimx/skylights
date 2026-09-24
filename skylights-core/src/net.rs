@@ -7,6 +7,28 @@
 //! test harness. The firmware supervisor owns the radio; this module owns only
 //! the delay schedule.
 
+use core::net::Ipv4Addr;
+
+/// Default MQTT broker port used when `MQTT_BROKER` omits one.
+pub const BROKER_PORT: u16 = 1883;
+
+/// Parses `MQTT_BROKER`: an IPv4 literal with an optional `mqtt://` scheme and
+/// an optional `:port` defaulting to [`BROKER_PORT`].
+///
+/// Hostnames, IPv6 literals, malformed addresses, and port `0` are rejected, so
+/// the device never depends on DNS to reach the broker.
+pub fn parse_broker(value: &str) -> Option<(Ipv4Addr, u16)> {
+    let rest = value.strip_prefix("mqtt://").unwrap_or(value);
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()?),
+        None => (rest, BROKER_PORT),
+    };
+    if port == 0 {
+        return None;
+    }
+    Some((host.parse::<Ipv4Addr>().ok()?, port))
+}
+
 /// First backoff delay after a drop, in milliseconds.
 pub const BACKOFF_INITIAL_MS: u64 = 1_000;
 
@@ -75,6 +97,35 @@ impl ReconnectBackoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_broker_accepts_scheme_ipv4_and_ports() {
+        assert_eq!(
+            parse_broker("mqtt://10.0.0.45:1883"),
+            Some((Ipv4Addr::new(10, 0, 0, 45), 1883))
+        );
+        assert_eq!(
+            parse_broker("mqtt://192.168.1.10"),
+            Some((Ipv4Addr::new(192, 168, 1, 10), BROKER_PORT))
+        );
+        assert_eq!(
+            parse_broker("10.0.0.45:1884"),
+            Some((Ipv4Addr::new(10, 0, 0, 45), 1884))
+        );
+        assert_eq!(
+            parse_broker("10.0.0.45"),
+            Some((Ipv4Addr::new(10, 0, 0, 45), BROKER_PORT))
+        );
+    }
+
+    #[test]
+    fn parse_broker_rejects_hostnames_ipv6_and_bad_ports() {
+        assert_eq!(parse_broker("mqtt://broker.example.com:1883"), None);
+        assert_eq!(parse_broker("mqtt://10.0.0.45:0"), None);
+        assert_eq!(parse_broker("mqtt://10.0.0.45:abc"), None);
+        assert_eq!(parse_broker("mqtt://::1:1883"), None);
+        assert_eq!(parse_broker(""), None);
+    }
 
     #[test]
     fn test_backoff_exact_sequence() {

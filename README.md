@@ -64,10 +64,23 @@ cargo build --package skylights-app --target xtensa-esp32-none-elf -Zbuild-std=c
 cargo clippy --package skylights-app --target xtensa-esp32-none-elf -Zbuild-std=core,alloc -- -D warnings
 ```
 
-The first four are the `host` job's gates plus the firmware build; the last is
-the `firmware` job's app-clippy gate. Run them all before opening a pull
+The first four are the `host` job's gates plus the firmware build; the last is the
+`firmware` job's app-clippy gate. Run them all before opening a pull
 request. `cargo run` flashes and monitors the board over USB via the `espflash`
 runner configured in `.cargo/config.toml`.
+
+## Bench verification
+
+Hardware-in-the-loop verification of the firmware on a physical ESP32-WROOM is
+driven by [`tests/bench_checklist.md`](tests/bench_checklist.md) with helper
+scripts under [`tests/bench/`](tests/bench/). The checklist covers boot, version
+and heap, Wi-Fi, MQTT parity, pulse and travel timing, live OTA with rollback,
+and release tooling, recording pass/fail evidence per case.
+
+The bench host needs only `espflash` and `python3`; images are built here and
+copied over. See [`tests/bench/README.md`](tests/bench/README.md) for the
+wiring, secrets selection, build/copy/flash commands, and the OTA/MQTT helper
+usage.
 
 ## Release / OTA publishing
 

@@ -21,12 +21,12 @@ defmt = "0.3"
 esp-hal = { version = "0.23.1", default-features = false, features = ["esp32", "unstable"] }
 esp-wifi = { version = "0.12", features = ["wifi", "esp32"] }
 esp-alloc = "0.6"
-esp-backtrace = { version = "0.15.1", default-features = false, features = ["esp32", "panic-handler", "defmt"] }
+esp-backtrace = { version = "0.15.1", default-features = false, features = ["esp32", "panic-handler", "println"] }
 esp-println = { version = "0.13.1", default-features = false, features = ["esp32", "defmt-espflash", "auto"] }
 skylights-core = { path = "skylights-core" }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = true
 codegen-units = 1
 debug = 2
@@ -37,7 +37,7 @@ overflow-checks = false
 opt-level = 3
 
 [profile.dev]
-opt-level = "s"
+opt-level = 3
 debug = 2
 overflow-checks = true
 

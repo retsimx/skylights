@@ -436,13 +436,13 @@ pub(super) fn build_request(
     } else {
         write!(out, "Host: {}:{}\r\n", uri.host, uri.port).map_err(|_| OtaError::Request)?;
     }
-    if let Some(user) = secrets::OTA_BASIC_AUTH_USER {
+    if !secrets::OTA_USER.is_empty() || !secrets::OTA_PASSWORD.is_empty() {
         // Never send credentials over an unencrypted transport.
         if !uri.tls {
             return Err(OtaError::Auth);
         }
         let mut auth = [0u8; AUTH_MAX_BYTES];
-        let n = basic_authorization(user, secrets::OTA_BASIC_AUTH_PASS.unwrap_or(""), &mut auth)
+        let n = basic_authorization(secrets::OTA_USER, secrets::OTA_PASSWORD, &mut auth)
             .ok_or(OtaError::Auth)?;
         let auth = core::str::from_utf8(&auth[..n]).map_err(|_| OtaError::Auth)?;
         write!(out, "Authorization: {}\r\n", auth).map_err(|_| OtaError::Request)?;
