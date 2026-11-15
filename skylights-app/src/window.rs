@@ -179,7 +179,23 @@ impl<'d> WindowController<'d> {
     }
 
     /// Consumes commands forever, driving the window and honouring interrupts.
+    ///
+    /// The first thing every boot does is home the window to
+    /// [`Position::CLOSED`]: position is RAM-only, so after any reset (cold
+    /// power-on, watchdog, OTA swap) the real position is unknown, and closing
+    /// an unknown window is the fail-safe action. This is deliberately not
+    /// gated on the reset cause — every reset means "position unknown".
+    ///
+    /// Homing can be slow: the core positioner always emits the full 71 s plan
+    /// from any position, including 0 %, so this is a hard-seat recalibration
+    /// and the window motor's own limit switches absorb it. It stays
+    /// interruptible, because `drive_to` selects against the command channel:
+    /// an inbound `SetTarget` or `Stop` cuts the home short like any other
+    /// travel.
     pub async fn run(mut self) -> ! {
+        println!("WINDOW {}: boot homing to CLOSED", self.id);
+        self.drive_to(Position::CLOSED).await;
+
         loop {
             match self.receiver.receive().await {
                 WindowCommand::SetTarget(target) => self.drive_to(target).await,

@@ -4,9 +4,11 @@ Physical (hardware-in-the-loop) verification of the native Rust ESP32 firmware.
 Sections A–I mirror the consolidated acceptance checklist on issue #11.
 
 > **Part 1 (this run):** naked ESP32-WROOM, no GPIO wiring. Covers C–H plus
-> pulse timing (A) and travel accuracy (B) measured **in-firmware**.
-> **Part 2 (later):** physical relay/motor/window motion and any optional
-> electrical waveform capture on production hardware.
+> pulse timing (A) and travel accuracy (B) measured **in-firmware**, with A7
+> probing the header pins directly by meter or scope.
+> **Part 2 (later):** physical relay/motor/window motion, the behavioural
+> pin-mapping check and the cold-boot phantom-open regression (Part 2 below),
+> and any optional electrical waveform capture on production hardware.
 
 ## How to use
 
@@ -23,6 +25,7 @@ tokens in this file or in any commit/comment. Replace them with `<broker>`,
 **Timing evidence format** (emitted by the firmware, `tests/bench/README.md`):
 
 ```
+WINDOW <n>: boot homing to CLOSED
 WINDOW <n>: actuation=<open|close|stop> pulses=2 low_ms=<a>,<b> high_ms=<c>,<d> settle_ms=<e>
 WINDOW <n>: travel start target=<p> planned_ms=<ms> stop_after=<bool>
 WINDOW <n>: travel end actual_ms=<ms> stop_pulse=<bool> position=<p>
@@ -35,6 +38,7 @@ WINDOW <n>: travel interrupted [elapsed_ms=<ms>|(retarget) elapsed_ms=<ms>] stop
 - [ ] Debug `secrets.rs` variant active (debug VLAN; OTA base URL points at the bench server).
 - [ ] Broker reachable and `skylight/+` subscribed by the test client.
 - [ ] Serial monitor running and tee'd to a log.
+- [ ] Boot homing has finished before starting A2: three `WINDOW <n>: travel end ... position=0` lines, ≈75 s after power-on. Otherwise the three boot `actuation=close` bursts pollute the A4/A6 counts and every `set` retargets a still-homing window.
 
 ---
 
@@ -42,13 +46,13 @@ WINDOW <n>: travel interrupted [elapsed_ms=<ms>|(retarget) elapsed_ms=<ms>] stop
 
 | ID | Test | Procedure | Expected | Evidence | Result |
 |----|------|-----------|----------|----------|--------|
-| A1 | Boot idle invariant | Power on; observe from reset | All 9 pins (2,4,16,19,5,18,21,22,23) inactive (HIGH); log `GPIO boot probe: all window outputs inactive = true` | boot log | |
+| A1 | Boot idle invariant | Power on; observe the log from reset, before the window tasks start homing | The probe is **not** a reset-time sample: it runs as the first GPIO action after `esp_hal::init`, before any window task exists, and reads the output register — i.e. what the firmware just commanded. It proves the firmware drove all 9 window pins (26,25,16,19,5,18,21,22,23) HIGH before any window task could move one, so the log shows `GPIO boot probe: all window outputs inactive = true`. It does **not** observe the pre-firmware bootloader window (power-on/reset to firmware init), so it cannot prove a boot glitch was absent — that is P2, Part 2. The pins do not stay idle — each window then homes to CLOSED (C6) | boot log | |
 | A2 | Low pulse | `skylight/set {"index":1,"percentage":100}` | `actuation=open ... low_ms=75,75` (each 75 ±5) | serial line | |
 | A3 | High pulse | as A2 | `high_ms=75,75` (each 75 ±5) | serial line | |
 | A4 | Pulse count | as A2 | `pulses=2` | serial line | |
 | A5 | Post-command settle | as A2 | `settle_ms=400` ±20 | serial line | |
 | A6 | Interlock | Publish `set` to window 1 and window 2 back-to-back | The two `actuation=` lines serialise; no overlapping bursts (single `pulses=2` line at a time) | serial lines | |
-| A7 | Pin mapping | For each window 1/2/3 issue open/close/stop | The `WINDOW n` line names the expected pin path (win1 2/4/16, win2 19/5/18, win3 21/22/23) | serial lines | |
+| A7 | Pin mapping | With the board still unwired, probe the window-1 header pins with a meter or scope: D26 (open), D25 (stop), D16 (close). For window 1 issue open, then close, then stop, one at a time, watching the named pin. Repeat for window 2 (19/5/18) and window 3 (21/22/23) | The **named** pin pulses LOW twice per action (2× 75 ms low / 75 ms high); the other two pins of that window and all nine pins of the other windows stay HIGH. The serial line names no pins — `WINDOW <n>: actuation=<action> ...` identifies only the window and the action — so record it as corroboration of which window/action pulsed. That the actuated window physically moves the intended way and the others do not is P1, Part 2 | scope/meter capture + serial lines | |
 
 ## B. Positioning & travel parity
 
@@ -72,6 +76,7 @@ WINDOW <n>: travel interrupted [elapsed_ms=<ms>|(retarget) elapsed_ms=<ms>] stop
 | C3 | Heap init | observe boot | Heap initialises, no panic; dynamic alloc verified | boot log | |
 | C4 | Passive-slot erase/write | trigger OTA check against a valid image | Active slot stays bootable; passive slot written | serial log | |
 | C5 | TLS allocation under load | complete an OTA download | 96 KiB heap suffices for TLS buffers | serial log | |
+| C6 | Boot homing to CLOSED | leave a window open (`skylight/set {"index":1,"percentage":100}`, let it settle), then power-cycle or press EN/RST — not `skylight/reset`, which is the OTA trigger | Every window drives to 0 %: `WINDOW <n>: boot homing to CLOSED` for `n`=1,2,3, then `WINDOW <n>: travel start target=0 planned_ms=71000 stop_after=false` and `WINDOW <n>: travel end ... position=0`. All three reach 0 % within **75 s** of the window tasks starting: three ~700 ms pulse bursts serialise on `ACTUATION_LOCK` (≈2.1 s), then the 71 s travel runs. `skylight/state` reporting `percentage:0` for all three is **corroboration only** — the positioner and the snapshot both initialise to CLOSED/0 %, so 0 % appears whether or not homing ran and cannot fail this case. Physical confirmation that the window actually shut is P3, Part 2 | serial log (MQTT capture as corroboration) | |
 
 ## D. Wi-Fi
 
@@ -151,13 +156,27 @@ identical; whitespace is an accepted, documented divergence (no legacy
 |---------|-------|------|------|-------|
 | A | 7 | | | |
 | B | 8 | | | |
-| C | 5 | | | |
+| C | 6 | | | |
 | D | 9 | | | |
 | E | 9 | | | |
 | F | 9 | | | |
 | G | 7 | | | |
 | H | 4 | | | |
-| **Total** | **58** | | | |
+| **Total** | **59** | | | |
 
-**Deferred to Part 2:** physical relay/motor/window motion; optional external
-electrical waveform capture; signed-manifest authenticity (#20).
+**Deferred to Part 2:** physical relay/motor/window motion (P1), the cold-boot
+phantom-open regression (P2), physical boot-homing confirmation (P3), optional
+external electrical waveform capture; signed-manifest authenticity (#20).
+
+---
+
+## Part 2 — wired hardware (deferred)
+
+These cases need the relay/motor/window wiring. They are **not** counted in the
+Part 1 summary in section I.
+
+| ID | Test | Procedure | Expected | Evidence | Result |
+|----|------|-----------|----------|----------|--------|
+| P1 | Pin mapping (behavioural) | with Part 2 wiring, for each of window 1/2/3 issue open, then close, then stop, one at a time | The actuated window moves the intended way and the other two do not move (win1 26/25/16, win2 19/5/18, win3 21/22/23) | observed motion | |
+| P2 | Cold-boot phantom-open regression | motor powered; cold-boot repeatedly (≥10 power cycles) and via EN/RST | No window motion at any boot other than the intended boot home. The original defect was a phantom open from the GPIO2/GPIO4 POR pull-downs, so on a scope/logic analyser D26/D25 also show no low pulse between power-on and firmware init | observed motion + optional capture | |
+| P3 | Boot homing closes a physically open window | open a window fully, power-cycle, wait | The window physically runs closed and stops at its limit, with the C6 serial lines present | observed motion + serial log | |
