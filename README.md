@@ -71,11 +71,9 @@ runner configured in `.cargo/config.toml`.
 
 ## Bench verification
 
-Hardware-in-the-loop verification of the firmware on a physical ESP32-WROOM is
-driven by [`tests/bench_checklist.md`](tests/bench_checklist.md) with helper
-scripts under [`tests/bench/`](tests/bench/). The checklist covers boot, version
-and heap, Wi-Fi, MQTT parity, pulse and travel timing, live OTA with rollback,
-and release tooling, recording pass/fail evidence per case.
+Hardware-in-the-loop verification of the firmware on a physical ESP32-WROOM uses
+the helper scripts under [`tests/bench/`](tests/bench/), covering serial
+logging, MQTT parity, and OTA artifact serving.
 
 The bench host needs only `espflash` and `python3`; images are built here and
 copied over. See [`tests/bench/README.md`](tests/bench/README.md) for the

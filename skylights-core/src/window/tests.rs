@@ -275,9 +275,9 @@ fn test_interrupted_position_mid_and_bounds() {
 
 #[test]
 fn test_pulse_constants() {
-    assert_eq!(PULSE_LOW_MS, 75);
-    assert_eq!(PULSE_HIGH_MS, 75);
+    assert_eq!(PULSE_LOW_MS, 100);
+    assert_eq!(PULSE_HIGH_MS, 800);
     assert_eq!(PULSE_SETTLE_MS, 400);
-    assert_eq!(PULSE_CYCLE_MS, 300);
-    assert_eq!(PULSE_SEQUENCE_MS, 700);
+    assert_eq!(PULSE_CYCLE_MS, 1800);
+    assert_eq!(PULSE_SEQUENCE_MS, 2200);
 }
