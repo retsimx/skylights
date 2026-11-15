@@ -52,6 +52,25 @@ pub const MQTT_REJOIN_FAILURES: u32 = 5;
 /// and is harmless because the device cannot reach the network in that state.
 pub const NO_IP_REBOOT_MS: u64 = 10 * 60 * 1000;
 
+/// Minimum duration an association must stay up (without a rejoin request) to
+/// count as a stable lease and refresh [`NoIpWatchdog`].
+///
+/// Short-lived flapping leases below this threshold must not postpone the
+/// radio-recovery reset (`NO_IP_REBOOT_MS`).
+pub const STABLE_LEASE_MS: u64 = 90_000;
+
+/// TCP keepalive interval configured on the MQTT socket, in milliseconds.
+///
+/// Detects half-open or silently dropped TCP links inside the MQTT keepalive
+/// window (`60_000` ms) and [`MQTT_TCP_TIMEOUT_MS`].
+pub const MQTT_TCP_KEEPALIVE_MS: u64 = 15_000;
+
+/// TCP user-timeout configured on the MQTT socket, in milliseconds.
+///
+/// Bounds how long an unacknowledged TCP connection stays open before smoltcp
+/// closes the socket and lets `mqtt_task` reconnect.
+pub const MQTT_TCP_TIMEOUT_MS: u64 = 45_000;
+
 /// Age of the newest completed MQTT dispatch at which the Wi-Fi supervisor stops
 /// trusting the association and abandons it to force a rejoin.
 ///
@@ -61,6 +80,16 @@ pub const NO_IP_REBOOT_MS: u64 = 10 * 60 * 1000;
 /// without delaying recovery much. Abandoning at this age is what recovers a
 /// black-holed association long before [`NO_IP_REBOOT_MS`] resets the chip.
 pub const MQTT_STALE_MS: u64 = 180_000;
+
+/// Returns `true` when an ending association held a stable lease and should
+/// refresh [`NoIpWatchdog::note_last_good`].
+///
+/// Associations ended by a forced rejoin (`rejoin_requested == true`) or shorter
+/// than [`STABLE_LEASE_MS`] are rejected so flapping or wedged links cannot
+/// indefinitely postpone the no-IP reset.
+pub const fn should_note_last_good(lease_ms: u64, rejoin_requested: bool) -> bool {
+    !rejoin_requested && lease_ms >= STABLE_LEASE_MS
+}
 
 /// Returns `true` when MQTT progress is old enough to abandon the association.
 pub const fn progress_stale(age_ms: u64) -> bool {
@@ -95,21 +124,21 @@ impl NoIpWatchdog {
         Self { last_good_ms: None }
     }
 
-    /// Records `now_ms` as the last moment the link was known good: a lease was
-    /// held then.
+    /// Records `now_ms` as the last moment the link was known good: a stable
+    /// lease was held then.
     ///
     /// The no-lease countdown is measured from this instant, so it is refreshed
-    /// both when a lease is acquired and when a held link is lost. Refreshing on
-    /// the loss is what keeps a healthy association from being charged to the
-    /// next outage: without it a link that stayed up longer than
-    /// [`NO_IP_REBOOT_MS`] looks overdue the moment it drops, and the following
-    /// re-association escalates to a reset.
+    /// when a stable held link is lost (gated by [`should_note_last_good`]).
+    /// Refreshing on a stable loss is what keeps a healthy association from
+    /// being charged to the next outage: without it a link that stayed up
+    /// longer than [`NO_IP_REBOOT_MS`] looks overdue the moment it drops, and
+    /// the following re-association escalates to a reset.
     pub fn note_last_good(&mut self, now_ms: u64) {
         self.last_good_ms = Some(now_ms);
     }
 
     /// Returns `true` when [`NO_IP_REBOOT_MS`] has elapsed since the last
-    /// known-good instant (a lease acquisition or a link loss).
+    /// known-good instant (a stable link loss, or boot).
     pub fn reboot_due(&self, now_ms: u64) -> bool {
         now_ms.saturating_sub(self.last_good_ms.unwrap_or(0)) >= NO_IP_REBOOT_MS
     }
@@ -314,5 +343,62 @@ mod tests {
         assert!(all_phases_run_ms < NO_IP_REBOOT_MS);
         assert!(progress_stale(MQTT_STALE_MS));
         assert!(!progress_reset_due(MQTT_STALE_MS));
+    }
+
+    #[test]
+    fn should_note_last_good_enforces_stable_lease_and_rejoin_gate() {
+        for lease_ms in [0, 1, STABLE_LEASE_MS - 1] {
+            assert!(!should_note_last_good(lease_ms, false), "lease {lease_ms}");
+            assert!(!should_note_last_good(lease_ms, true), "lease {lease_ms}");
+        }
+        for lease_ms in [STABLE_LEASE_MS, STABLE_LEASE_MS + 1, STABLE_LEASE_MS * 10] {
+            assert!(should_note_last_good(lease_ms, false), "lease {lease_ms}");
+            assert!(!should_note_last_good(lease_ms, true), "lease {lease_ms}");
+        }
+        assert_eq!(crate::STABLE_LEASE_MS, STABLE_LEASE_MS);
+        assert_eq!(
+            crate::should_note_last_good(STABLE_LEASE_MS, false),
+            should_note_last_good(STABLE_LEASE_MS, false)
+        );
+    }
+
+    #[test]
+    fn flapping_leases_do_not_postpone_watchdog_while_stable_lease_does() {
+        let mut watchdog = NoIpWatchdog::new();
+        let short_lease_ms = STABLE_LEASE_MS - 1;
+
+        // Repeated short-lived associations (< STABLE_LEASE_MS) never refresh
+        // note_last_good, so Clock B still trips at NO_IP_REBOOT_MS.
+        let mut now_ms = 0u64;
+        while now_ms < NO_IP_REBOOT_MS {
+            now_ms += short_lease_ms;
+            if should_note_last_good(short_lease_ms, false) {
+                watchdog.note_last_good(now_ms);
+            }
+        }
+        assert!(watchdog.reboot_due(NO_IP_REBOOT_MS));
+
+        // A healthy >= STABLE_LEASE_MS drop (not triggered by rejoin) refreshes
+        // the watchdog and restarts the NO_IP_REBOOT_MS window.
+        let mut healthy_watchdog = NoIpWatchdog::new();
+        let drop_at_ms = NO_IP_REBOOT_MS + 30_000;
+        if should_note_last_good(STABLE_LEASE_MS, false) {
+            healthy_watchdog.note_last_good(drop_at_ms);
+        }
+        assert!(!healthy_watchdog.reboot_due(drop_at_ms + NO_IP_REBOOT_MS - 1));
+        assert!(healthy_watchdog.reboot_due(drop_at_ms + NO_IP_REBOOT_MS));
+    }
+
+    #[test]
+    fn mqtt_tcp_keepalive_and_timeout_fit_keepalive_and_stale_budgets() {
+        const MQTT_KEEPALIVE_MS: u64 = 60_000;
+        const {
+            assert!(MQTT_TCP_KEEPALIVE_MS > 0);
+            assert!(MQTT_TCP_KEEPALIVE_MS < MQTT_TCP_TIMEOUT_MS);
+            assert!(MQTT_TCP_TIMEOUT_MS < MQTT_KEEPALIVE_MS);
+            assert!(MQTT_TCP_TIMEOUT_MS < MQTT_STALE_MS);
+        }
+        assert_eq!(crate::MQTT_TCP_KEEPALIVE_MS, MQTT_TCP_KEEPALIVE_MS);
+        assert_eq!(crate::MQTT_TCP_TIMEOUT_MS, MQTT_TCP_TIMEOUT_MS);
     }
 }
