@@ -52,8 +52,9 @@ use esp_wifi::EspWifiController;
 use static_cell::StaticCell;
 
 use skylights_core::wifi::{
-    progress_fresh, progress_stale, NoIpWatchdog, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, DNS_TIMEOUT_MS,
-    JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS, MQTT_STALE_MS, NO_IP_REBOOT_MS,
+    progress_fresh, progress_stale, should_note_last_good, NoIpWatchdog, DHCP_ATTEMPTS,
+    DHCP_TIMEOUT_MS, DNS_TIMEOUT_MS, JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS, MQTT_STALE_MS,
+    NO_IP_REBOOT_MS,
 };
 use skylights_core::{LinkState, ReconnectBackoff};
 
@@ -217,9 +218,10 @@ async fn attempt_join(controller: &mut WifiController<'static>) -> Result<(), Jo
 /// Waits for a DHCP lease on the current association, then supervises the link.
 ///
 /// DHCP is retried in place up to `DHCP_ATTEMPTS` times; the loop also returns
-/// early on a rejoin request. A lease resets the backoff and refreshes the no-IP
-/// watchdog. Returns when the link drops, a rejoin is requested, DHCP gives up,
-/// or the association stops carrying MQTT traffic.
+/// early on a rejoin request. A lease resets the backoff; the no-IP watchdog is
+/// refreshed on exit only if the association lasted at least `STABLE_LEASE_MS`
+/// without a rejoin request. Returns when the link drops, a rejoin is
+/// requested, DHCP gives up, or the association stops carrying MQTT traffic.
 async fn handle_associated(
     controller: &mut WifiController<'static>,
     stack: Stack<'static>,
@@ -255,7 +257,6 @@ async fn handle_associated(
 
     backoff.reset();
     WIFI_CONNECTED.sender().send(LinkState::Connected);
-    watchdog.note_last_good(Instant::now().as_millis());
     if let Some(config) = stack.config_v4() {
         println!("Wi-Fi connected, IPv4: {}", config.address);
     }
@@ -283,6 +284,7 @@ async fn handle_associated(
     // claims the association is up.
     let mut liveness = Ticker::every(Duration::from_secs(LIVENESS_PERIOD_SECS));
     let associated_at = Instant::now();
+    let mut rejoin_requested = false;
 
     loop {
         match select3(
@@ -298,6 +300,7 @@ async fn handle_associated(
             }
             Either3::Second(()) => {
                 println!("Wi-Fi: rejoin requested");
+                rejoin_requested = true;
                 break;
             }
             Either3::Third(()) => {
@@ -324,13 +327,13 @@ async fn handle_associated(
 
     // The association is ending. Clock B starts here: `connection_task`
     // escalates to a reset if no association and lease are recovered within
-    // `NO_IP_REBOOT_MS`, and stamping on the way out is what keeps a healthy
-    // association from being charged to the outage that follows.
-    //
-    // Refreshing this stamp on every exit cannot postpone the reset that
-    // matters: Clock A is stamped only by completed MQTT dispatches, which this
-    // task never writes on an unhealthy association's behalf.
-    watchdog.note_last_good(Instant::now().as_millis());
+    // `NO_IP_REBOOT_MS`. Only an association that stayed up for at least
+    // `STABLE_LEASE_MS` without a rejoin request refreshes the watchdog, so a
+    // healthy association is not charged to the outage that follows while
+    // short-lived flapping leases or wedged links cannot postpone Clock B.
+    if should_note_last_good(associated_at.elapsed().as_millis(), rejoin_requested) {
+        watchdog.note_last_good(Instant::now().as_millis());
+    }
 }
 
 /// Clock A: resets the chip once the MQTT path has been silent for
@@ -385,10 +388,10 @@ async fn connection_task(mut controller: WifiController<'static>, stack: Stack<'
             Err(JoinFailure::Error) => println!("Wi-Fi: connect failed, will retry"),
         }
 
-        // Clock A again, from the supervisor's own loop: a link that flaps
-        // faster than the liveness ticker never reaches the in-association
-        // check, and every pass here refreshes Clock B (`note_last_good`), so
-        // Clock B alone could be postponed forever by a flapping access point.
+        // Clock A again, from the supervisor's own loop: any drop that lasted at
+        // least `STABLE_LEASE_MS` without a rejoin request refreshes Clock B
+        // (`note_last_good`), so Clock B alone would not catch a link that
+        // keeps holding past `STABLE_LEASE_MS` without ever carrying MQTT.
         reset_if_silent(progress_age(boot.elapsed()));
 
         if watchdog.reboot_due(Instant::now().as_millis()) {

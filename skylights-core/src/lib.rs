@@ -30,9 +30,10 @@ pub use version::{parse_version, VersionError};
 
 pub mod wifi;
 pub use wifi::{
-    progress_fresh, progress_reset_due, progress_stale, NoIpWatchdog, RejoinCounter, DHCP_ATTEMPTS,
-    DHCP_TIMEOUT_MS, DNS_TIMEOUT_MS, JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS, MQTT_CONNECT_TIMEOUT_MS,
-    MQTT_REJOIN_FAILURES, MQTT_STALE_MS, NO_IP_REBOOT_MS,
+    progress_fresh, progress_reset_due, progress_stale, should_note_last_good, NoIpWatchdog,
+    RejoinCounter, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, DNS_TIMEOUT_MS, JOIN_TIMEOUT_MS,
+    LEAVE_TIMEOUT_MS, MQTT_CONNECT_TIMEOUT_MS, MQTT_REJOIN_FAILURES, MQTT_STALE_MS,
+    MQTT_TCP_KEEPALIVE_MS, MQTT_TCP_TIMEOUT_MS, NO_IP_REBOOT_MS, STABLE_LEASE_MS,
 };
 
 pub mod net;

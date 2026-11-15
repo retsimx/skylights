@@ -37,7 +37,9 @@ use skylights_core::mqtt::{
     TOPIC_SET, TOPIC_STATE, TOPIC_STOP, TOPIC_WILDCARD,
 };
 use skylights_core::version::parse_version;
-use skylights_core::wifi::{RejoinCounter, MQTT_CONNECT_TIMEOUT_MS};
+use skylights_core::wifi::{
+    RejoinCounter, MQTT_CONNECT_TIMEOUT_MS, MQTT_TCP_KEEPALIVE_MS, MQTT_TCP_TIMEOUT_MS,
+};
 use skylights_core::{LinkState, Position, ReconnectBackoff};
 
 use crate::net::{note_progress, WIFI_CONNECTED, WIFI_REJOIN};
@@ -152,9 +154,10 @@ pub async fn mqtt_task(stack: Stack<'static>) -> ! {
 
 /// Resolves, connects, subscribes, and serves one MQTT session.
 ///
-/// Returns `true` when a connection was established (so the caller resets its
-/// backoff) and `false` when a pre-serve step failed. Either way the caller
-/// applies the next bounded backoff delay before retrying.
+/// Returns `true` when the session completed at least one dispatch (so the
+/// caller resets its backoff) and `false` when a pre-serve step failed or the
+/// session dropped before making progress. Either way the caller applies the
+/// next bounded backoff delay before retrying.
 async fn serve_connection(
     session: &mut Session<'static>,
     socket: &mut TcpSocket<'static>,
@@ -171,6 +174,12 @@ async fn serve_connection(
     };
 
     socket.abort();
+    socket.set_keep_alive(Some(embassy_time_net::Duration::from_millis(
+        MQTT_TCP_KEEPALIVE_MS,
+    )));
+    socket.set_timeout(Some(embassy_time_net::Duration::from_millis(
+        MQTT_TCP_TIMEOUT_MS,
+    )));
     let endpoint = SocketAddrV4::new(address, port);
     if !matches!(
         with_timeout(CONNECT_TIMEOUT, socket.connect(endpoint)).await,
@@ -203,15 +212,20 @@ async fn serve_connection(
         }
     }
 
-    // CONNECT + SUBACK on `skylight/+` succeeded: the session is live.
+    // CONNECT + SUBACK on `skylight/+` succeeded: mark healthy for OTA trial
+    // confirmation, while deferring progress/rejoin/backoff reset until a
+    // dispatch actually completes in `run_connection`.
     MQTT_HEALTHY.sender().send(true);
-    note_progress();
-    rejoin.success();
 
-    run_connection(&mut connection, boot).await;
+    let made_progress = run_connection(&mut connection, boot, rejoin).await;
 
     // The established connection is gone; the session is no longer live.
     MQTT_HEALTHY.sender().send(false);
+    if !made_progress {
+        note_failure(rejoin);
+        println!("MQTT: connection lost before progress, reconnecting");
+        return false;
+    }
     println!("MQTT: connection lost, reconnecting");
     true
 }
@@ -288,9 +302,15 @@ async fn subscribe_if_fresh<IO: minimq::Io>(connection: &mut Connection<'_, '_, 
     }
 }
 
-/// Drives one live connection until it fails, then returns to reconnect.
-async fn run_connection<IO: minimq::Io>(connection: &mut Connection<'_, '_, IO>, boot: Instant) {
+/// Drives one live connection until it fails, then returns whether at least
+/// one dispatch succeeded.
+async fn run_connection<IO: minimq::Io>(
+    connection: &mut Connection<'_, '_, IO>,
+    boot: Instant,
+    rejoin: &mut RejoinCounter,
+) -> bool {
     let mut heartbeat = Ticker::every(Duration::from_secs(HEARTBEAT_SECS));
+    let mut made_progress = false;
 
     loop {
         let action = match select3(connection.recv(), heartbeat.next(), STATE_CHANGED.wait()).await
@@ -302,7 +322,7 @@ async fn run_connection<IO: minimq::Io>(connection: &mut Connection<'_, '_, IO>,
         };
 
         if matches!(action, Action::Disconnect) {
-            return;
+            return made_progress;
         }
 
         // A publish that cannot make progress must not wedge the task, and a
@@ -310,14 +330,18 @@ async fn run_connection<IO: minimq::Io>(connection: &mut Connection<'_, '_, IO>,
         // treats both as a lost connection, which restores the reconnect ->
         // repeated-failure -> rejoin chain.
         match with_timeout(DISPATCH_TIMEOUT, dispatch(&action, connection, boot)).await {
-            Ok(true) => note_progress(),
+            Ok(true) => {
+                note_progress();
+                rejoin.success();
+                made_progress = true;
+            }
             Ok(false) => {
                 println!("MQTT: dispatch failed; dropping the session");
-                return;
+                return made_progress;
             }
             Err(_) => {
                 println!("MQTT: dispatch timed out; dropping the session");
-                return;
+                return made_progress;
             }
         }
     }
