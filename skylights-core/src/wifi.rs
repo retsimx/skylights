@@ -24,6 +24,20 @@ pub const DHCP_ATTEMPTS: u32 = 3;
 /// Maximum time to wait for a `disconnect`/leave call before continuing.
 pub const LEAVE_TIMEOUT_MS: u64 = 5_000;
 
+/// Maximum time to wait for a DNS lookup before giving up on it.
+///
+/// Bounds the post-association DNS probe so an unresponsive resolver cannot
+/// wedge the Wi-Fi supervisor before it enters link supervision.
+pub const DNS_TIMEOUT_MS: u64 = 10_000;
+
+/// Maximum time to wait for one MQTT TCP connect, broker handshake, or
+/// subscribe attempt.
+///
+/// Bounds every pre-serve phase so a stalled broker or dead link records a
+/// failure, advances reconnect backoff, and can trigger a Wi-Fi rejoin instead
+/// of hanging forever.
+pub const MQTT_CONNECT_TIMEOUT_MS: u64 = 10_000;
+
 /// Consecutive MQTT connect failures that request a Wi-Fi rejoin.
 ///
 /// Covers the "associated but no traffic" case, where the link never reports
@@ -247,5 +261,58 @@ mod tests {
             assert!(!counter.failure());
         }
         assert!(counter.failure());
+    }
+
+    #[test]
+    fn timeout_constants_are_positive_and_reexported() {
+        const {
+            assert!(DNS_TIMEOUT_MS > 0);
+            assert!(MQTT_CONNECT_TIMEOUT_MS > 0);
+            assert!(DNS_TIMEOUT_MS < MQTT_STALE_MS);
+            assert!(MQTT_CONNECT_TIMEOUT_MS < MQTT_STALE_MS);
+            assert!(MQTT_STALE_MS < NO_IP_REBOOT_MS);
+        }
+        assert_eq!(crate::DNS_TIMEOUT_MS, DNS_TIMEOUT_MS);
+        assert_eq!(crate::MQTT_CONNECT_TIMEOUT_MS, MQTT_CONNECT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn association_dhcp_and_dns_probe_fit_well_below_reboot_budget() {
+        // One attempt_join (start + leave + connect) + DHCP_ATTEMPTS + DNS probe.
+        let worst_case_bringup_ms = JOIN_TIMEOUT_MS
+            + LEAVE_TIMEOUT_MS
+            + JOIN_TIMEOUT_MS
+            + (DHCP_ATTEMPTS as u64) * DHCP_TIMEOUT_MS
+            + DNS_TIMEOUT_MS;
+        assert!(worst_case_bringup_ms < NO_IP_REBOOT_MS / 2);
+    }
+
+    #[test]
+    fn mqtt_rejoin_run_with_bounded_phases_and_backoff_fits_recovery_budgets() {
+        use crate::net::ReconnectBackoff;
+
+        let mut backoff = ReconnectBackoff::new();
+        let mut counter = RejoinCounter::new();
+        let mut single_phase_run_ms = 0u64;
+        let mut all_phases_run_ms = 0u64;
+        let mut tripped = false;
+
+        for _ in 0..MQTT_REJOIN_FAILURES {
+            let delay = backoff.next_delay_ms();
+            // One phase hanging (TCP connect, MQTT handshake, or subscribe).
+            single_phase_run_ms += MQTT_CONNECT_TIMEOUT_MS + delay;
+            // Worst case: all three pre-serve phases nearly exhaust their bounds.
+            all_phases_run_ms += 3 * MQTT_CONNECT_TIMEOUT_MS + delay;
+            tripped = counter.failure();
+        }
+
+        assert!(tripped);
+        // Normal hung-step run triggers Wi-Fi rejoin before stale abandonment.
+        assert!(single_phase_run_ms < MQTT_STALE_MS);
+        // Even a 3-phase worst-case run stays well inside the chip-reset budget,
+        // and MQTT_STALE_MS abandons the association long before NO_IP_REBOOT_MS.
+        assert!(all_phases_run_ms < NO_IP_REBOOT_MS);
+        assert!(progress_stale(MQTT_STALE_MS));
+        assert!(!progress_reset_due(MQTT_STALE_MS));
     }
 }
