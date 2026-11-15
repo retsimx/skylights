@@ -17,6 +17,7 @@ use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::gpio::{Level, Output};
+use esp_hal::reset::reset_reason;
 use esp_hal::rng::Rng;
 use esp_println::println;
 
@@ -60,6 +61,10 @@ fn log_boot_banner() {
             );
         }
     }
+
+    // Why the chip came back: `Some(CoreMwdt0)` is a watchdog reset, which logs
+    // nothing from the dead firmware, so this line is the only trace of it.
+    println!("BOOT: reset reason {:?}", reset_reason());
 }
 
 #[esp_hal_embassy::main]
