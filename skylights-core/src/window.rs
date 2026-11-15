@@ -13,11 +13,20 @@ use crate::{Position, WindowState};
 /// milliseconds.
 pub const TRAVEL_TIME_MS: u64 = 71_000;
 
-/// Duration the actuation line is held low for each pulse, in milliseconds.
-pub const PULSE_LOW_MS: u64 = 75;
+/// Duration the actuation line is held low for each button press, in
+/// milliseconds.
+///
+/// The actuation line drives the OEM remote's button pad directly, so this is
+/// the emulated "click" duration. 100 ms is deliberate: a shorter press was
+/// observed to leave the remote occasionally unresponsive.
+pub const PULSE_LOW_MS: u64 = 100;
 
-/// Duration the actuation line is held high for each pulse, in milliseconds.
-pub const PULSE_HIGH_MS: u64 = 75;
+/// Duration the actuation line is held high between the two button presses, in
+/// milliseconds.
+///
+/// This is the gap between clicks; 800 ms gives the remote time to transmit and
+/// reset before the second press.
+pub const PULSE_HIGH_MS: u64 = 800;
 
 /// Settling delay after the final pulse before the window is considered
 /// actuated, in milliseconds.

@@ -98,7 +98,7 @@ impl<'d> WindowDriver<'d> {
     /// Emits the actuation pulse sequence for `actuation`.
     ///
     /// Holds [`ACTUATION_LOCK`] for the whole sequence so two windows can never
-    /// pulse at once. The selected pin runs two 75 ms low / 75 ms high pulses
+    /// pulse at once. The selected pin runs two 100 ms low / 800 ms high pulses
     /// followed by a 400 ms settle, and is left high (inactive) afterwards.
     ///
     /// The measured low/high/settle durations are logged after the sequence so

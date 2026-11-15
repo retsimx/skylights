@@ -72,36 +72,11 @@ fn log_boot_banner() {
 async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(esp_hal::Config::default());
 
-    // Initialize 96 KiB static heap allocator
-    heap::init_heap();
-
-    // Verify heap dynamic allocation
-    verify_heap_allocations();
-
-    log_boot_banner();
-
-    // esp-wifi drives TIMG0; embassy time drives TIMG1. The timer groups are
-    // never reused.
-    let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
-    // `TimerGroup` is not `Drop`, so `wdt` and `timer0` are moved out
-    // independently; the WDT guards the post-swap self-test window.
-    let wdt = timg1.wdt;
-    esp_hal_embassy::init(timg1.timer0);
-
-    // `Rng` is `Copy` over the phantom `RNG` peripheral, so the same instance
-    // is shared by esp-wifi here and by the OTA task below.
-    let rng = Rng::new(peripherals.RNG);
-
-    let stack = net::init(
-        &spawner,
-        peripherals.TIMG0,
-        rng,
-        peripherals.RADIO_CLK,
-        peripherals.WIFI,
-    );
-    println!("Wi-Fi station and network tasks spawned");
-
-    // All pins initialised Level::High (inactive) -> boot invariant.
+    // Drive all 9 window outputs inactive (HIGH) as the very first thing, before
+    // any slow initialisation (banner flash read, heap check, Wi-Fi bring-up).
+    // On reset the ESP32 leaves GPIO16-23/25-26 floating, and a floating
+    // active-low line could read as "pressed"; configuring them HIGH
+    // immediately minimises that window.
     //
     // Window 1 uses GPIO26/25 rather than GPIO2/4: GPIO2 has an internal POR
     // pull-down (plus the DevKit LED to GND) and GPIO4 a POR pull-down, so the
@@ -130,6 +105,35 @@ async fn main(spawner: Spawner) {
         "GPIO boot probe: all window outputs inactive = {}",
         gpio_safe
     );
+
+    // Initialize 96 KiB static heap allocator
+    heap::init_heap();
+
+    // Verify heap dynamic allocation
+    verify_heap_allocations();
+
+    log_boot_banner();
+
+    // esp-wifi drives TIMG0; embassy time drives TIMG1. The timer groups are
+    // never reused.
+    let timg1 = esp_hal::timer::timg::TimerGroup::new(peripherals.TIMG1);
+    // `TimerGroup` is not `Drop`, so `wdt` and `timer0` are moved out
+    // independently; the WDT guards the post-swap self-test window.
+    let wdt = timg1.wdt;
+    esp_hal_embassy::init(timg1.timer0);
+
+    // `Rng` is `Copy` over the phantom `RNG` peripheral, so the same instance
+    // is shared by esp-wifi here and by the OTA task below.
+    let rng = Rng::new(peripherals.RNG);
+
+    let stack = net::init(
+        &spawner,
+        peripherals.TIMG0,
+        rng,
+        peripherals.RADIO_CLK,
+        peripherals.WIFI,
+    );
+    println!("Wi-Fi station and network tasks spawned");
 
     spawner.spawn(window::window_task(0, w1)).unwrap();
     spawner.spawn(window::window_task(1, w2)).unwrap();
