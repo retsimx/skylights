@@ -10,6 +10,12 @@
 //! Protocol parsing/formatting is pure and lives in `skylights-core::mqtt`;
 //! this module only moves bytes and dispatches owned [`Action`]s to the shared
 //! window command channels and state snapshot.
+//!
+//! Every completed dispatch stamps the progress clock in [`crate::net`]: the
+//! only signal here that stops advancing when traffic stops flowing, and
+//! therefore the only one the Wi-Fi supervisor and the runtime hardware
+//! watchdog can trust. [`MQTT_HEALTHY`] answers a different question ("is a
+//! session live right now?") and gates OTA self-test confirmation.
 
 use core::net::SocketAddrV4;
 
@@ -34,7 +40,7 @@ use skylights_core::version::parse_version;
 use skylights_core::wifi::RejoinCounter;
 use skylights_core::{LinkState, Position, ReconnectBackoff};
 
-use crate::net::{WIFI_CONNECTED, WIFI_REJOIN};
+use crate::net::{note_progress, WIFI_CONNECTED, WIFI_REJOIN};
 use crate::ota::OTA_TRIGGER;
 use crate::secrets;
 use crate::window::{WindowCommand, WindowSnapshot, STATE_CHANGED, WINDOW_COMMANDS, WINDOW_STATES};
@@ -50,6 +56,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Telemetry heartbeat period, in seconds.
 const HEARTBEAT_SECS: u64 = 60;
+
+/// Upper bound on one outbound dispatch (a publish).
+///
+/// A dead link with a full TCP send buffer blocks the write forever. Without
+/// this bound the task wedges: it stops heartbeating, records no connect
+/// failure, and never asks for a rejoin, so nothing recovers it. That is the
+/// shape of the 2026-10-24 outage, where the broker timed the client out and it
+/// never returned.
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Placeholder connected-AP RSSI; `0` means "unknown" (design 007 §10).
 const WIFI_RSSI_PLACEHOLDER: i8 = 0;
@@ -182,6 +197,7 @@ async fn serve_connection(
 
     // CONNECT + SUBACK on `skylight/+` succeeded: the session is live.
     MQTT_HEALTHY.sender().send(true);
+    note_progress();
     rejoin.success();
 
     run_connection(&mut connection, boot).await;
@@ -281,7 +297,21 @@ async fn run_connection<IO: minimq::Io>(connection: &mut Connection<'_, '_, IO>,
             return;
         }
 
-        dispatch(&action, connection, boot).await;
+        // A publish that cannot make progress must not wedge the task, and a
+        // publish the socket refused must not count as liveness: the caller
+        // treats both as a lost connection, which restores the reconnect ->
+        // repeated-failure -> rejoin chain.
+        match with_timeout(DISPATCH_TIMEOUT, dispatch(&action, connection, boot)).await {
+            Ok(true) => note_progress(),
+            Ok(false) => {
+                println!("MQTT: dispatch failed; dropping the session");
+                return;
+            }
+            Err(_) => {
+                println!("MQTT: dispatch timed out; dropping the session");
+                return;
+            }
+        }
     }
 }
 
@@ -320,26 +350,37 @@ fn parse_action(topic: &str, payload: &[u8]) -> Action {
 }
 
 /// Executes an owned action against the live connection and shared state.
+///
+/// Returns `false` only when the transport refused an outbound write, so the
+/// caller can treat that as a lost session instead of liveness. Every inbound
+/// arm returns `true` — the action came out of `recv()`, which is itself proof
+/// that bytes flowed — including when it drops a request it cannot encode: that
+/// is a local fault, not a dead link, and must not cost a session.
 async fn dispatch<IO: minimq::Io>(
     action: &Action,
     connection: &mut Connection<'_, '_, IO>,
     boot: Instant,
-) {
+) -> bool {
     match action {
         Action::Set(index, percentage) => {
             send_command(
                 *index,
                 WindowCommand::SetTarget(Position::new(percentage.get())),
             );
+            true
         }
-        Action::Stop(index) => send_command(*index, WindowCommand::Stop),
+        Action::Stop(index) => {
+            send_command(*index, WindowCommand::Stop);
+            true
+        }
         Action::Get(index) => publish_get_response(connection, *index).await,
         Action::Reset => {
             OTA_TRIGGER.signal(());
             println!("MQTT: OTA reset requested");
+            true
         }
         Action::Heartbeat | Action::StateChanged => publish_state(connection, boot).await,
-        Action::Disconnect | Action::Ignore => {}
+        Action::Disconnect | Action::Ignore => true,
     }
 }
 
@@ -355,10 +396,13 @@ fn send_command(index: Index, command: WindowCommand) {
 }
 
 /// Publishes `index`'s current position on [`TOPIC_GET_RESPONSE`] (QoS 0).
+///
+/// Returns `false` only on a transport failure; a request this task cannot
+/// answer still returns `true` because the socket is fine.
 async fn publish_get_response<IO: minimq::Io>(
     connection: &mut Connection<'_, '_, IO>,
     index: Index,
-) {
+) -> bool {
     let snapshot = {
         let states = WINDOW_STATES.lock().await;
         states[index.get() as usize - 1]
@@ -368,44 +412,53 @@ async fn publish_get_response<IO: minimq::Io>(
             "MQTT: stored percentage {} out of range",
             snapshot.percentage
         );
-        return;
+        return true;
     };
 
     let mut buffer = [0u8; RESPONSE_BUFFER_SIZE];
     let Ok(length) = format_get_response(index, percentage, &mut buffer) else {
         println!("MQTT: failed to encode get response");
-        return;
+        return true;
     };
-    publish_qos0(connection, TOPIC_GET_RESPONSE, &buffer[..length]).await;
+    publish_qos0(connection, TOPIC_GET_RESPONSE, &buffer[..length]).await
 }
 
 /// Publishes a telemetry snapshot on [`TOPIC_STATE`] (QoS 0).
-async fn publish_state<IO: minimq::Io>(connection: &mut Connection<'_, '_, IO>, boot: Instant) {
+///
+/// Returns `false` only on a transport failure; an encoding fault is local and
+/// leaves the session usable.
+async fn publish_state<IO: minimq::Io>(
+    connection: &mut Connection<'_, '_, IO>,
+    boot: Instant,
+) -> bool {
     let state = build_state(boot).await;
     let mut buffer = [0u8; STATE_BUFFER_SIZE];
     let Ok(length) = format_state(&state, &mut buffer) else {
         println!("MQTT: failed to encode state telemetry");
-        return;
+        return true;
     };
-    publish_qos0(connection, TOPIC_STATE, &buffer[..length]).await;
+    publish_qos0(connection, TOPIC_STATE, &buffer[..length]).await
 }
 
 /// Publishes `payload` on `topic` at QoS 0, logging any transport failure.
 ///
-/// A QoS-0 publish is never silently discarded: the write result is checked
-/// and a failure is logged, even though no acknowledgement is expected.
+/// A QoS-0 publish is never silently discarded: the write result is returned so
+/// the caller can tell "the socket accepted these bytes" from "the write
+/// failed", even though no acknowledgement is expected.
 async fn publish_qos0<IO: minimq::Io>(
     connection: &mut Connection<'_, '_, IO>,
     topic: &str,
     payload: &[u8],
-) {
+) -> bool {
     if connection
         .publish(Publication::new(topic, payload))
         .await
         .is_err()
     {
         println!("MQTT: failed to publish {topic}");
+        return false;
     }
+    true
 }
 
 /// Builds the telemetry message from the shared snapshots and uptime.

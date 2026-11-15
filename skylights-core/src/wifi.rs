@@ -38,6 +38,36 @@ pub const MQTT_REJOIN_FAILURES: u32 = 5;
 /// and is harmless because the device cannot reach the network in that state.
 pub const NO_IP_REBOOT_MS: u64 = 10 * 60 * 1000;
 
+/// Age of the newest completed MQTT dispatch at which the Wi-Fi supervisor stops
+/// trusting the association and abandons it to force a rejoin.
+///
+/// Must comfortably exceed the worst legitimate silent gap. Heartbeats are
+/// every 60 s and a failed attempt is bounded by one backoff ceiling (30 s)
+/// plus connect and handshake timeouts (10 s each), so 3 minutes leaves margin
+/// without delaying recovery much. Abandoning at this age is what recovers a
+/// black-holed association long before [`NO_IP_REBOOT_MS`] resets the chip.
+pub const MQTT_STALE_MS: u64 = 180_000;
+
+/// Returns `true` when MQTT progress is old enough to abandon the association.
+pub const fn progress_stale(age_ms: u64) -> bool {
+    age_ms >= MQTT_STALE_MS
+}
+
+/// Returns `true` when MQTT progress is old enough to reset the chip.
+///
+/// A QoS-0 publish the socket accepted proves the write, not delivery, so the
+/// real detection bound is this threshold plus one heartbeat in flight.
+pub const fn progress_reset_due(age_ms: u64) -> bool {
+    age_ms >= NO_IP_REBOOT_MS
+}
+
+/// Returns `true` while MQTT progress is recent enough to keep feeding the
+/// runtime hardware watchdog. Exactly the negation of [`progress_reset_due`],
+/// so the reset and the watchdog-starvation recovery cannot drift apart.
+pub const fn progress_fresh(age_ms: u64) -> bool {
+    !progress_reset_due(age_ms)
+}
+
 /// Tracks how long the device has been without an IP lease.
 #[derive(Debug, Clone, Copy)]
 pub struct NoIpWatchdog {
@@ -154,6 +184,43 @@ mod tests {
         watchdog.note_last_good(ELEVEN_HOURS_MS);
         assert!(!watchdog.reboot_due(ELEVEN_HOURS_MS + NO_IP_REBOOT_MS - 1));
         assert!(watchdog.reboot_due(ELEVEN_HOURS_MS + NO_IP_REBOOT_MS));
+    }
+
+    #[test]
+    fn progress_turns_stale_only_at_the_threshold() {
+        assert!(!progress_stale(0));
+        assert!(!progress_stale(MQTT_STALE_MS - 1));
+        assert!(progress_stale(MQTT_STALE_MS));
+        assert!(progress_stale(MQTT_STALE_MS * 2));
+        // Abandoning the association fires strictly before the chip reset.
+        assert!(!progress_reset_due(MQTT_STALE_MS));
+    }
+
+    #[test]
+    fn progress_reset_fires_only_at_the_threshold() {
+        assert!(!progress_reset_due(0));
+        assert!(!progress_reset_due(MQTT_STALE_MS));
+        assert!(!progress_reset_due(NO_IP_REBOOT_MS - 1));
+        assert!(progress_reset_due(NO_IP_REBOOT_MS));
+        assert!(progress_reset_due(NO_IP_REBOOT_MS * 3));
+    }
+
+    /// The runtime watchdog feeds on `progress_fresh` while the supervisor
+    /// resets on `progress_reset_due`: they must stay exact opposites, or one
+    /// recovery path silently outlives the other.
+    #[test]
+    fn progress_fresh_is_the_negation_of_reset_due() {
+        for age in [
+            0,
+            1,
+            MQTT_STALE_MS,
+            NO_IP_REBOOT_MS - 1,
+            NO_IP_REBOOT_MS,
+            NO_IP_REBOOT_MS + 1,
+            NO_IP_REBOOT_MS * 10,
+        ] {
+            assert_eq!(progress_fresh(age), !progress_reset_due(age), "age {age}");
+        }
     }
 
     #[test]
