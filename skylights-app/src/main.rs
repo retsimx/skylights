@@ -102,9 +102,14 @@ async fn main(spawner: Spawner) {
     println!("Wi-Fi station and network tasks spawned");
 
     // All pins initialised Level::High (inactive) -> boot invariant.
+    //
+    // Window 1 uses GPIO26/25 rather than GPIO2/4: GPIO2 has an internal POR
+    // pull-down (plus the DevKit LED to GND) and GPIO4 a POR pull-down, so the
+    // active-low open/stop lines glitched low during bootloader startup and
+    // triggered phantom opens. GPIO26/25 have no strapping or POR pull.
     let w1 = window::WindowPins::new(
-        Output::new(peripherals.GPIO2, Level::High),
-        Output::new(peripherals.GPIO4, Level::High),
+        Output::new(peripherals.GPIO26, Level::High),
+        Output::new(peripherals.GPIO25, Level::High),
         Output::new(peripherals.GPIO16, Level::High),
     );
     let w2 = window::WindowPins::new(
