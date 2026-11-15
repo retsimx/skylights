@@ -1,7 +1,6 @@
 # Skylights bench harness
 
-Tools and procedure for the hardware-in-the-loop verification in
-[`../bench_checklist.md`](../bench_checklist.md). Replace every `<placeholder>`
+Tools and procedure for hardware-in-the-loop verification. Replace every `<placeholder>`
 with your site value; **never commit or echo secrets, SSIDs, or host addresses.**
 
 ## 1. Hardware
