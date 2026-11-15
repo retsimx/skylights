@@ -62,8 +62,9 @@ fn log_boot_banner() {
         }
     }
 
-    // Why the chip came back: `Some(CoreMwdt0)` is a watchdog reset, which logs
-    // nothing from the dead firmware, so this line is the only trace of it.
+    // Why the chip came back: `Some(CoreMwdt1)` is a TIMG1 (main watchdog 1)
+    // reset, which logs nothing from the dead firmware, so this line is the only
+    // trace of it. `Some(CoreSw)` is our own `software_reset()`, which does log.
     println!("BOOT: reset reason {:?}", reset_reason());
 }
 
