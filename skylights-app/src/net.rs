@@ -206,7 +206,7 @@ async fn handle_associated(
 
     backoff.reset();
     WIFI_CONNECTED.sender().send(LinkState::Connected);
-    watchdog.note_ip(Instant::now().as_millis());
+    watchdog.note_last_good(Instant::now().as_millis());
     if let Some(config) = stack.config_v4() {
         println!("Wi-Fi connected, IPv4: {}", config.address);
     }
@@ -226,8 +226,14 @@ async fn handle_associated(
     )
     .await
     {
-        Either::First(_) => println!("Wi-Fi: network link dropped"),
-        Either::Second(()) => println!("Wi-Fi: rejoin requested"),
+        Either::First(_) => {
+            watchdog.note_last_good(Instant::now().as_millis());
+            println!("Wi-Fi: network link dropped");
+        }
+        Either::Second(()) => {
+            watchdog.note_last_good(Instant::now().as_millis());
+            println!("Wi-Fi: rejoin requested");
+        }
     }
 }
 

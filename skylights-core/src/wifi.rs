@@ -41,25 +41,33 @@ pub const NO_IP_REBOOT_MS: u64 = 10 * 60 * 1000;
 /// Tracks how long the device has been without an IP lease.
 #[derive(Debug, Clone, Copy)]
 pub struct NoIpWatchdog {
-    last_ip_ms: Option<u64>,
+    last_good_ms: Option<u64>,
 }
 
 impl NoIpWatchdog {
     /// Creates a watchdog that is "due" once [`NO_IP_REBOOT_MS`] has elapsed
     /// since boot if no lease is ever acquired.
     pub const fn new() -> Self {
-        Self { last_ip_ms: None }
+        Self { last_good_ms: None }
     }
 
-    /// Records that an IP lease is held at `now_ms`.
-    pub fn note_ip(&mut self, now_ms: u64) {
-        self.last_ip_ms = Some(now_ms);
+    /// Records `now_ms` as the last moment the link was known good: a lease was
+    /// held then.
+    ///
+    /// The no-lease countdown is measured from this instant, so it is refreshed
+    /// both when a lease is acquired and when a held link is lost. Refreshing on
+    /// the loss is what keeps a healthy association from being charged to the
+    /// next outage: without it a link that stayed up longer than
+    /// [`NO_IP_REBOOT_MS`] looks overdue the moment it drops, and the following
+    /// re-association escalates to a reset.
+    pub fn note_last_good(&mut self, now_ms: u64) {
+        self.last_good_ms = Some(now_ms);
     }
 
-    /// Returns `true` when no lease has been held for at least
-    /// [`NO_IP_REBOOT_MS`].
+    /// Returns `true` when [`NO_IP_REBOOT_MS`] has elapsed since the last
+    /// known-good instant (a lease acquisition or a link loss).
     pub fn reboot_due(&self, now_ms: u64) -> bool {
-        now_ms.saturating_sub(self.last_ip_ms.unwrap_or(0)) >= NO_IP_REBOOT_MS
+        now_ms.saturating_sub(self.last_good_ms.unwrap_or(0)) >= NO_IP_REBOOT_MS
     }
 }
 
@@ -120,13 +128,32 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_note_ip_restarts_the_window() {
+    fn watchdog_note_last_good_restarts_the_window() {
         let mut watchdog = NoIpWatchdog::new();
-        watchdog.note_ip(5_000);
+        watchdog.note_last_good(5_000);
         assert!(!watchdog.reboot_due(5_000 + NO_IP_REBOOT_MS - 1));
         assert!(watchdog.reboot_due(5_000 + NO_IP_REBOOT_MS));
-        watchdog.note_ip(5_000 + NO_IP_REBOOT_MS);
+        watchdog.note_last_good(5_000 + NO_IP_REBOOT_MS);
         assert!(!watchdog.reboot_due(5_000 + NO_IP_REBOOT_MS));
+    }
+
+    /// Documents the trap this fix closes: a lease stamped at association time
+    /// is overdue as soon as the association outlives [`NO_IP_REBOOT_MS`], so a
+    /// drop after a long association used to reset the MCU. Recording the link
+    /// loss restarts the window from the drop.
+    #[test]
+    fn link_loss_after_a_long_association_does_not_reboot() {
+        const ELEVEN_HOURS_MS: u64 = 11 * 60 * 60 * 1000;
+
+        let mut watchdog = NoIpWatchdog::new();
+        watchdog.note_last_good(0);
+        // Pre-fix behaviour: association age alone trips the watchdog.
+        assert!(watchdog.reboot_due(ELEVEN_HOURS_MS));
+
+        // Recording the drop restarts the countdown from the loss.
+        watchdog.note_last_good(ELEVEN_HOURS_MS);
+        assert!(!watchdog.reboot_due(ELEVEN_HOURS_MS + NO_IP_REBOOT_MS - 1));
+        assert!(watchdog.reboot_due(ELEVEN_HOURS_MS + NO_IP_REBOOT_MS));
     }
 
     #[test]
