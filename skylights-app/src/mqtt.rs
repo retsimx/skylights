@@ -37,7 +37,7 @@ use skylights_core::mqtt::{
     TOPIC_SET, TOPIC_STATE, TOPIC_STOP, TOPIC_WILDCARD,
 };
 use skylights_core::version::parse_version;
-use skylights_core::wifi::RejoinCounter;
+use skylights_core::wifi::{RejoinCounter, MQTT_CONNECT_TIMEOUT_MS};
 use skylights_core::{LinkState, Position, ReconnectBackoff};
 
 use crate::net::{note_progress, WIFI_CONNECTED, WIFI_REJOIN};
@@ -48,11 +48,11 @@ use crate::window::{WindowCommand, WindowSnapshot, STATE_CHANGED, WINDOW_COMMAND
 /// Advertised MQTT keepalive, in seconds.
 const KEEPALIVE_SECS: u16 = 60;
 
-/// Upper bound on one TCP connect / MQTT handshake attempt.
+/// Upper bound on one TCP connect, MQTT handshake, or subscribe attempt.
 ///
-/// Without this, an unroutable broker (a SYN with no reply) blocks the task
-/// forever: no failure is recorded, so no reconnect backoff and no rejoin.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Without this, an unroutable or silent broker blocks the task forever: no
+/// failure is recorded, so no reconnect backoff and no rejoin.
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(MQTT_CONNECT_TIMEOUT_MS);
 
 /// Telemetry heartbeat period, in seconds.
 const HEARTBEAT_SECS: u64 = 60;
@@ -190,9 +190,17 @@ async fn serve_connection(
         }
     };
 
-    if !subscribe_if_fresh(&mut connection).await {
-        note_failure(rejoin);
-        return false;
+    match with_timeout(CONNECT_TIMEOUT, subscribe_if_fresh(&mut connection)).await {
+        Ok(true) => {}
+        Ok(false) => {
+            note_failure(rejoin);
+            return false;
+        }
+        Err(_) => {
+            println!("MQTT: subscribe timed out, retrying");
+            note_failure(rejoin);
+            return false;
+        }
     }
 
     // CONNECT + SUBACK on `skylight/+` succeeded: the session is live.

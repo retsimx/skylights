@@ -52,8 +52,8 @@ use esp_wifi::EspWifiController;
 use static_cell::StaticCell;
 
 use skylights_core::wifi::{
-    progress_fresh, progress_stale, NoIpWatchdog, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, JOIN_TIMEOUT_MS,
-    LEAVE_TIMEOUT_MS, MQTT_STALE_MS, NO_IP_REBOOT_MS,
+    progress_fresh, progress_stale, NoIpWatchdog, DHCP_ATTEMPTS, DHCP_TIMEOUT_MS, DNS_TIMEOUT_MS,
+    JOIN_TIMEOUT_MS, LEAVE_TIMEOUT_MS, MQTT_STALE_MS, NO_IP_REBOOT_MS,
 };
 use skylights_core::{LinkState, ReconnectBackoff};
 
@@ -264,9 +264,15 @@ async fn handle_associated(
         skylights_core::ota::parse_url(crate::secrets::OTA_URL, crate::secrets::OTA_PROJECT)
             .map(|uri| uri.host)
             .unwrap_or("");
-    match resolve(stack, dns_probe).await {
-        Some(addr) => println!("DNS resolved {} -> {}", dns_probe, addr),
-        None => println!("DNS lookup failed for {}", dns_probe),
+    match with_timeout(
+        Duration::from_millis(DNS_TIMEOUT_MS),
+        resolve(stack, dns_probe),
+    )
+    .await
+    {
+        Ok(Some(addr)) => println!("DNS resolved {} -> {}", dns_probe, addr),
+        Ok(None) => println!("DNS lookup failed for {}", dns_probe),
+        Err(_) => println!("DNS lookup timed out for {}", dns_probe),
     }
 
     // End-to-end liveness, not link state: `WIFI_CONNECTED` is this task's own
@@ -369,7 +375,10 @@ async fn connection_task(mut controller: WifiController<'static>, stack: Stack<'
         WIFI_CONNECTED.sender().send(LinkState::Connecting);
 
         match attempt_join(&mut controller).await {
-            Ok(()) => handle_associated(&mut controller, stack, &mut backoff, &mut watchdog).await,
+            Ok(()) => {
+                WIFI_REJOIN.reset();
+                handle_associated(&mut controller, stack, &mut backoff, &mut watchdog).await;
+            }
             Err(JoinFailure::Timeout) => {
                 println!("Wi-Fi: association attempt timed out, will retry")
             }
