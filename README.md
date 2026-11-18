@@ -198,7 +198,7 @@ The 4 MiB flash is partitioned into symmetric 1856 KiB dual OTA slots (`skylight
 
 ### Release / OTA Publishing (`VERSION` & `deploy.sh`)
 
-The published version is the single bare integer in the repository-root `VERSION` file (currently `8`). It must match `^[0-9]+$`. `deploy.sh` only **reads** `VERSION` — it never increments it. Bumping the version is an explicit repository commit made before deploying:
+The published version is the single bare integer in the repository-root `VERSION` file (currently `9`). It must match `^[0-9]+$`. `deploy.sh` only **reads** `VERSION` — it never increments it. Bumping the version is an explicit repository commit made before deploying:
 
 ```sh
 # edit VERSION, e.g. 8 -> 9
