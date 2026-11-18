@@ -45,7 +45,7 @@ pub use net::{
 pub mod window;
 pub use window::{
     interrupted_position, travel_duration_ms, Actuation, Direction, TravelPlan, WindowPositioner,
-    PULSE_CYCLE_MS, PULSE_HIGH_MS, PULSE_LOW_MS, PULSE_SEQUENCE_MS, PULSE_SETTLE_MS,
+    MIN_PULSE_MS, PULSE_CYCLE_MS, PULSE_HIGH_MS, PULSE_LOW_MS, PULSE_SEQUENCE_MS, PULSE_SETTLE_MS,
     TRAVEL_TIME_MS,
 };
 

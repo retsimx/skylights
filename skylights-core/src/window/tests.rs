@@ -74,7 +74,7 @@ fn test_partial_opening_0_to_50() {
     let plan = positioner.request(Position::new(50)).unwrap();
     assert_eq!(plan.actuation, Actuation::Open);
     assert_eq!(plan.direction, Direction::Opening);
-    assert_eq!(plan.travel_ms, 35_500);
+    assert_eq!(plan.travel_ms, 32_467);
     assert_eq!(plan.target, Position::new(50));
     assert!(plan.stop_after);
     assert_eq!(positioner.state(), WindowState::Opening);
@@ -87,7 +87,7 @@ fn test_partial_opening_50_to_75() {
     let plan = positioner.request(Position::new(75)).unwrap();
     assert_eq!(plan.actuation, Actuation::Open);
     assert_eq!(plan.direction, Direction::Opening);
-    assert_eq!(plan.travel_ms, 17_750);
+    assert_eq!(plan.travel_ms, 15_558);
     assert_eq!(plan.target, Position::new(75));
     assert!(plan.stop_after);
     assert_eq!(positioner.state(), WindowState::Opening);
@@ -99,7 +99,7 @@ fn test_partial_closing_100_to_25() {
     let plan = positioner.request(Position::new(25)).unwrap();
     assert_eq!(plan.actuation, Actuation::Close);
     assert_eq!(plan.direction, Direction::Closing);
-    assert_eq!(plan.travel_ms, 53_250);
+    assert_eq!(plan.travel_ms, 48_275);
     assert_eq!(plan.target, Position::new(25));
     assert!(plan.stop_after);
     assert_eq!(positioner.state(), WindowState::Closing);
@@ -167,8 +167,8 @@ fn test_stop_while_opening_interpolates() {
     positioner.request(Position::OPEN);
     assert!(positioner.is_moving());
     let position = positioner.stop(35_500);
-    assert_eq!(position, Position::new(50));
-    assert_eq!(positioner.position(), Position::new(50));
+    assert_eq!(position, Position::new(55));
+    assert_eq!(positioner.position(), Position::new(55));
     assert_eq!(positioner.state(), WindowState::Stopped);
     assert!(!positioner.is_moving());
 }
@@ -179,8 +179,8 @@ fn test_stop_while_closing_interpolates() {
     positioner.request(Position::CLOSED);
     assert!(positioner.is_moving());
     let position = positioner.stop(35_500);
-    assert_eq!(position, Position::new(50));
-    assert_eq!(positioner.position(), Position::new(50));
+    assert_eq!(position, Position::new(44));
+    assert_eq!(positioner.position(), Position::new(44));
     assert_eq!(positioner.state(), WindowState::Stopped);
     assert!(!positioner.is_moving());
 }
@@ -217,43 +217,142 @@ fn test_stop_clamps_at_both_bounds() {
 }
 
 #[test]
-fn test_travel_duration_symmetry_and_zero() {
-    let samples = [
-        (Position::new(0), Position::new(0)),
-        (Position::new(25), Position::new(25)),
-        (Position::new(0), Position::new(100)),
-        (Position::new(20), Position::new(80)),
-        (Position::new(75), Position::new(25)),
+fn test_travel_duration_calibrated_cases() {
+    // Requirement table (design 014 §4.3). The ±200 ms tolerance covers the
+    // integer-truncation difference on the closing case: the arithmetic gives
+    // 15 250 ms where the measured table rounds to 15 251 ms.
+    let cases = [
+        (0u8, 20u8, 13_111u64), // opening from the closed seat
+        (0, 1, 852),            // opening from the closed seat
+        (10, 20, 5_399),        // opening mid-travel
+        (1, 20, 11_494),        // opening mid-travel
+        (50, 25, 15_250),       // closing mid-travel (table: 15 251)
+        (50, 51, MIN_PULSE_MS), // mid-open 1 %: clamped, not a no-op
     ];
-    for (from, to) in samples {
-        assert_eq!(travel_duration_ms(from, to), travel_duration_ms(to, from));
+    for (from, to, expected) in cases {
+        let actual = travel_duration_ms(Position::new(from), Position::new(to));
+        assert!(
+            actual.abs_diff(expected) <= 200,
+            "travel_duration_ms({from}, {to}) = {actual}, expected {expected} +/-200"
+        );
     }
-    assert_eq!(travel_duration_ms(Position::new(0), Position::new(0)), 0);
-    assert_eq!(travel_duration_ms(Position::new(60), Position::new(60)), 0);
+
+    // Exact: 8 522 tenths truncates cleanly to 852. The ±200 band above also
+    // accepts the retired 710 ms flat model, so assert this row exactly too.
+    assert_eq!(travel_duration_ms(Position::new(0), Position::new(1)), 852);
+
+    // The clamp is exact: the mid-travel 1 % step needs negative drive time
+    // and must land on the floor rather than on zero.
     assert_eq!(
-        travel_duration_ms(Position::new(0), Position::new(100)),
-        TRAVEL_TIME_MS
+        travel_duration_ms(Position::new(50), Position::new(51)),
+        MIN_PULSE_MS
     );
-    assert_eq!(travel_duration_ms(Position::new(0), Position::new(1)), 710);
+}
+
+#[test]
+fn test_travel_duration_equal_positions_are_zero() {
+    // A partial no-op never commands travel; `request` rejects these before
+    // calling the helper.
+    for pct in 0..=100u8 {
+        assert_eq!(
+            travel_duration_ms(Position::new(pct), Position::new(pct)),
+            0,
+            "equal positions at {pct} % must not command travel"
+        );
+    }
+}
+
+#[test]
+fn test_boundary_plan_from_any_position() {
+    let targets = [
+        (Position::CLOSED, Actuation::Close, Direction::Closing),
+        (Position::OPEN, Actuation::Open, Direction::Opening),
+    ];
+    for start in [0u8, 50, 100] {
+        for (target, actuation, direction) in targets {
+            let mut positioner = positioner_at(start);
+            let plan = positioner
+                .request(target)
+                .expect("boundary targets always emit a plan");
+            assert_eq!(plan.travel_ms, TRAVEL_TIME_MS);
+            assert_eq!(plan.travel_ms, 71_000);
+            assert_eq!(plan.target, target);
+            assert_eq!(plan.actuation, actuation);
+            assert_eq!(plan.direction, direction);
+            assert!(!plan.stop_after, "boundary drives never need a Stop pulse");
+        }
+    }
+}
+
+#[test]
+fn test_min_pulse_is_not_a_noop() {
+    let mut positioner = positioner_at(50);
+    let plan = positioner
+        .request(Position::new(51))
+        .expect("a 1 % mid-travel step still pulses");
+    assert_eq!(plan.travel_ms, MIN_PULSE_MS);
+    assert_eq!(plan.travel_ms, 200);
+    assert!(plan.stop_after);
+    assert_eq!(plan.direction, Direction::Opening);
+    assert_eq!(plan.target, Position::new(51));
+    assert_eq!(positioner.state(), WindowState::Opening);
+}
+
+#[test]
+fn test_interrupted_position_round_trips() {
+    // Mid-travel opening 50 -> 70: the commanded time must invert back to the
+    // 20-point delta (this is the requirement's round-trip, ±1).
+    let travel_ms = travel_duration_ms(Position::new(50), Position::new(70));
+    assert_eq!(travel_ms, 12_172);
+
+    let stopped = interrupted_position(Position::new(50), Direction::Opening, travel_ms);
+    let delta = stopped.percent() as i32 - 50;
+    assert!(
+        (delta - 20).abs() <= 1,
+        "expected a 20 point delta +/-1, got {delta} ({stopped:?})"
+    );
+    assert!(
+        (stopped.percent() as i32 - 70).abs() <= 1,
+        "expected 70 % +/-1, got {stopped:?}"
+    );
+}
+
+#[test]
+fn test_interrupted_position_zero_elapsed_is_model_value() {
+    // Spec-literal (design D5): the mid curves carry the ~2 % per-move
+    // over-travel as a negative intercept, so zero elapsed reads +2 / -2. The
+    // seat curve's positive intercept cancels, so it still reads 0.
+    assert_eq!(
+        interrupted_position(Position::new(50), Direction::Opening, 0),
+        Position::new(52)
+    );
+    assert_eq!(
+        interrupted_position(Position::new(50), Direction::Closing, 0),
+        Position::new(48)
+    );
+    assert_eq!(
+        interrupted_position(Position::new(0), Direction::Opening, 0),
+        Position::new(0)
+    );
 }
 
 #[test]
 fn test_interrupted_position_mid_and_bounds() {
     assert_eq!(
         interrupted_position(Position::new(0), Direction::Opening, 35_500),
-        Position::new(50)
+        Position::new(55)
     );
     assert_eq!(
         interrupted_position(Position::new(100), Direction::Closing, 35_500),
-        Position::new(50)
+        Position::new(44)
     );
     assert_eq!(
         interrupted_position(Position::new(50), Direction::Opening, 0),
-        Position::new(50)
+        Position::new(52)
     );
     assert_eq!(
         interrupted_position(Position::new(50), Direction::Closing, 0),
-        Position::new(50)
+        Position::new(48)
     );
     assert_eq!(
         interrupted_position(Position::new(0), Direction::Opening, TRAVEL_TIME_MS * 2),

@@ -1,17 +1,30 @@
 //! Window actuation travel-time state machine.
 //!
 //! Provides a pure, hardware-agnostic model of a skylight window driven by
-//! timed pulses. Full travel between 0 % (closed) and 100 % (open) is assumed
-//! to take [`TRAVEL_TIME_MS`]; partial targets interpolate linearly. The state
-//! machine only uses integer millisecond ticks — no clocks, sleeps, floats, or
-//! hardware dependencies — so it runs identically on the ESP32 target and on
-//! the host test harness.
+//! timed pulses. [`TRAVEL_TIME_MS`] is the full-stroke time used for boundary
+//! targets only (0 % and 100 %). Partial moves use three measured affine
+//! inversions — opening from the closed seat, opening mid-travel, and closing
+//! mid-travel — selected by the start position and direction, and
+//! [`interrupted_position`] inverts the same relations. The state machine only
+//! uses integer millisecond ticks — no clocks, sleeps, floats, or hardware
+//! dependencies — so it runs identically on the ESP32 target and on the host
+//! test harness.
 
 use crate::{Position, WindowState};
 
 /// Full travel time between the closed (0 %) and open (100 %) boundaries, in
 /// milliseconds.
+///
+/// This is a boundary-only constant: partial moves use the calibrated affine
+/// inversions in [`travel_duration_ms`].
 pub const TRAVEL_TIME_MS: u64 = 71_000;
+
+/// Smallest drive pulse for a partial move, in milliseconds.
+///
+/// The mid-travel inversions have negative intercepts: a 1–2 % step needs zero
+/// or negative drive time. Clamp to this value instead of underflowing or
+/// turning the move into a no-op. Tunable; 200 ms is the starting value.
+pub const MIN_PULSE_MS: u64 = 200;
 
 /// Duration the actuation line is held low for each button press, in
 /// milliseconds.
@@ -83,27 +96,107 @@ struct Motion {
     target: Position,
 }
 
-/// Calculates the travel duration in milliseconds between two positions.
+// Measured inversions, stored as integer tenths of a millisecond per percent
+// (slope) and tenths of a millisecond (intercept). A single `/ 10` at the end
+// recovers milliseconds. Forward: travel_ms = (slope·ΔV + intercept) / 10.
+// Inverse:  ΔV = (10·elapsed − intercept) / slope.
+
+/// Opening from the closed seat: `travel_ms = 645.2·ΔV + 207`.
+/// Fit `Δθ = 0.2170·D − 0.045`; residual sd 0.0335°, max 0.0506°, n = 6.
+const SEAT_OPEN_SLOPE_TENTHS: i32 = 6_452;
+/// Seat-opening intercept: +207 ms (0.045° of the fit).
+const SEAT_OPEN_INTERCEPT_TENTHS: i32 = 2_070;
+
+/// Opening mid-travel: `travel_ms = 677.3·ΔV − 1374`.
+/// Fit `Δθ = 0.2067·D + 0.284`; residual sd 0.0307°, max 0.0814°, n = 11.
+const MID_OPEN_SLOPE_TENTHS: i32 = 6_773;
+/// Mid-opening intercept: −1374 ms (the ≈2 % per-move over-travel).
+const MID_OPEN_INTERCEPT_TENTHS: i32 = -13_740;
+
+/// Closing mid-travel: `travel_ms = 660.5·ΔV − 1262`.
+/// Fit `Δθ = −0.2120·D − 0.267`; n = 2 (residuals not reported).
+const MID_CLOSE_SLOPE_TENTHS: i32 = 6_605;
+/// Mid-closing intercept: −1262 ms (the same per-move over-travel).
+const MID_CLOSE_INTERCEPT_TENTHS: i32 = -12_620;
+
+/// One measured affine relation between commanded drive time and travel.
+#[derive(Clone, Copy)]
+struct DriveCurve {
+    slope_tenths: i32,
+    intercept_tenths: i32,
+}
+
+const SEAT_OPEN: DriveCurve = DriveCurve {
+    slope_tenths: SEAT_OPEN_SLOPE_TENTHS,
+    intercept_tenths: SEAT_OPEN_INTERCEPT_TENTHS,
+};
+
+const MID_OPEN: DriveCurve = DriveCurve {
+    slope_tenths: MID_OPEN_SLOPE_TENTHS,
+    intercept_tenths: MID_OPEN_INTERCEPT_TENTHS,
+};
+
+const MID_CLOSE: DriveCurve = DriveCurve {
+    slope_tenths: MID_CLOSE_SLOPE_TENTHS,
+    intercept_tenths: MID_CLOSE_INTERCEPT_TENTHS,
+};
+
+/// Selects the measured curve for a move. Closing is always mid-travel: a
+/// partial close cannot start at 0.
+fn drive_curve(from_pct: u8, direction: Direction) -> DriveCurve {
+    match direction {
+        Direction::Closing => MID_CLOSE,
+        Direction::Opening if from_pct == 0 => SEAT_OPEN,
+        Direction::Opening => MID_OPEN,
+    }
+}
+
+/// Calculates the drive duration in milliseconds for a partial move.
 ///
-/// The result is linear in the percentage delta: a full 0↔100 travel takes
-/// exactly [`TRAVEL_TIME_MS`].
+/// Uses the calibrated affine inversion for the start position and direction,
+/// floored at [`MIN_PULSE_MS`]. An equal-position delta returns 0. Boundary
+/// targets (0 % and 100 %) always use [`TRAVEL_TIME_MS`] via
+/// [`WindowPositioner::request`] and must not call this helper.
 pub fn travel_duration_ms(from: Position, to: Position) -> u64 {
-    (from.percent().abs_diff(to.percent()) as u64) * TRAVEL_TIME_MS / 100
+    let delta_v = from.percent().abs_diff(to.percent()) as i32;
+    if delta_v == 0 {
+        return 0; // partial no-op; request() rejects these before calling
+    }
+    let direction = if to > from {
+        Direction::Opening
+    } else {
+        Direction::Closing
+    };
+    let curve = drive_curve(from.percent(), direction);
+    let ms = (curve.slope_tenths * delta_v + curve.intercept_tenths) / 10;
+    ms.max(MIN_PULSE_MS as i32) as u64
 }
 
 /// Calculates the position reached after `elapsed_ms` of travel in `direction`
 /// starting from `start`.
 ///
-/// The result is saturated and clamped to the 0..=100 range, so an oversized
-/// elapsed time can never overflow past the boundary or underflow below it.
+/// Inverts the same calibrated curve used by [`travel_duration_ms`], so a move
+/// commanded for a given delta and stopped after its full drive time returns to
+/// that delta within ±1 %. The result is clamped to the 0..=100 range, and the
+/// elapsed time is bounded before the arithmetic, so an oversized value can
+/// never overflow past the boundary or underflow below it.
 pub fn interrupted_position(start: Position, direction: Direction, elapsed_ms: u64) -> Position {
-    let traveled = elapsed_ms.saturating_mul(100) / TRAVEL_TIME_MS;
-    let start_pct = start.percent() as u64;
+    let curve = drive_curve(start.percent(), direction);
+
+    // Bound the arithmetic; any longer drive is already beyond the far
+    // boundary, so the result is clamped to 0/100 either way.
+    let elapsed_ms = elapsed_ms.min(TRAVEL_TIME_MS * 2) as i32;
+
+    // `+ slope/2` rounds to nearest, so a partial move does not systematically
+    // lose a position point; a plain floor is therefore wrong for the inverse.
+    let numerator = elapsed_ms * 10 - curve.intercept_tenths + curve.slope_tenths / 2;
+    let delta_v = (numerator / curve.slope_tenths).clamp(0, 100);
+
     let pct = match direction {
-        Direction::Opening => start_pct.saturating_add(traveled),
-        Direction::Closing => start_pct.saturating_sub(traveled),
+        Direction::Opening => start.percent() as i32 + delta_v,
+        Direction::Closing => start.percent() as i32 - delta_v,
     };
-    Position::new(pct.min(100) as u8)
+    Position::new(pct.clamp(0, 100) as u8)
 }
 
 /// Travel-time state machine for a single skylight window.

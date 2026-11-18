@@ -78,15 +78,24 @@ All actuation timing constants live in `skylights-core/src/window.rs` and are ex
 ### Travel Calibration, Interpolation & Boundaries
 
 - **Calibrated Full Travel**: `TRAVEL_TIME_MS = 71_000` (**71 seconds** for `0% <-> 100%`).
-- **Linear Virtual Position (`0..=100`)**: Position is tracked in RAM using integer millisecond arithmetic (`travel_duration_ms = |from - to| * 71_000 / 100`).
+- **Calibrated Partial-Move Mapping (`0..=100`)**: Partial moves are not linear. Three measured affine inversions map a `ΔV` percent step to a drive time, selected by the move's start position and direction:
+
+  | Move | Drive time for a `ΔV` step |
+  |---|---|
+  | Opening from the closed seat (`0%`) | `645.2 * ΔV + 207` ms |
+  | Opening mid-travel (start `> 0%`) | `677.3 * ΔV - 1374` ms |
+  | Closing mid-travel (any start) | `660.5 * ΔV - 1262` ms |
+
+  Arithmetic stays in integer tenths with a single final `/ 10`; the fits' residuals are 0.22–0.24% of the 14.0° stroke. The fits are calibrated on 0.71–7.10 s partial-move samples and 71 s full strokes (the mid-travel lines are anchored at 3.55–7.10 s); boundary commands re-zero, so error does not accumulate across a boundary.
 - **Intermediate Targets (`1..=99`)**:
   - If `target == current_position`, the request is a no-op.
-  - Otherwise, the controller pulses `Open` or `Close`, waits the interpolated `travel_ms`, and emits a trailing **`Stop`** pulse (`stop_after = true`) upon arrival.
+  - Otherwise, the controller pulses `Open` or `Close`, waits the calibrated `travel_ms`, and emits a trailing **`Stop`** pulse (`stop_after = true`) upon arrival.
+  - The calibrated `travel_ms` is floored at `MIN_PULSE_MS = 200`, so a 1% mid-travel step still emits a pulse and a trailing `Stop` — never a no-op.
 - **Boundary Targets (`0` and `100`)**:
   - Driving to `0%` (closed) or `100%` (open) always runs the full **`71,000 ms`** drive **without** a trailing `Stop` pulse (`stop_after = false`), even if the virtual position is already `0%` or `100%`.
   - The window motor's internal end-stop limit switches absorb any over-travel, giving a reliable hard-seat recalibration.
 - **Mid-Travel Interruption**:
-  - Receiving `Stop` mid-travel halts the timer, pulses `Stop`, and computes the new virtual position via `interrupted_position` (`start +/- (elapsed_ms * 100 / 71_000)`, clamped to `0..=100`).
+  - Receiving `Stop` mid-travel halts the timer, pulses `Stop`, and computes the new virtual position via `interrupted_position`, which inverts the same calibrated curve for the move's start position and direction, accurate to ±1% of stroke for partial moves and clamped to `0..=100`. An interrupted full-stroke boundary drive is less accurate (up to a few points) and is corrected by the next boundary command.
   - Receiving a new `SetTarget` mid-travel pulses `Stop`, records the interpolated position, and immediately begins driving toward the newest target.
 - **Fail-Safe Boot Homing**:
   - Because virtual position is RAM-only, **every reset** (cold boot, watchdog reset, or OTA swap) immediately homes all 3 windows to `0%` (`Position::CLOSED`) via a full `71 s` hard-seat close.
