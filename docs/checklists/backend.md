@@ -1,0 +1,15 @@
+# Backend / Firmware Domain Checklist
+
+Pre-flight checklist for Rust, `no_std`, ESP32, MQTT and OTA work. Verify each
+item with explicit `file:line` citations.
+
+- [ ] **Core purity**: `skylights-core` stays free of `esp-*`, HAL, allocator and task dependencies, and builds on the host. (❌ Anti-pattern: `use esp_hal::...` in core, ✅ Required: hardware behind an app-side adapter or a pure trait) [Ref: skylights-core/src/lib.rs]
+- [ ] **Absolute boundaries**: Targets 0 and 100 always drive exactly `TRAVEL_TIME_MS` (71 000 ms) with `stop_after = false`, from any position, including an existing boundary. (❌ Anti-pattern: a partial plan for 0/100, ✅ Required: the boundary branch in `request`) [Ref: skylights-core/src/window.rs]
+- [ ] **Calibrated inverse consistency**: `travel_duration_ms` and `interrupted_position` select the same case from the same start position/direction; a change to one must update the other and the round-trip test. (❌ Anti-pattern: separate coefficient copies, ✅ Required: one `drive_curve` selector) [Ref: skylights-core/src/window.rs]
+- [ ] **Integer-only model**: The window model uses integer tenths and clamps to `0..=100`/`MIN_PULSE_MS`; no floats, no unchecked overflow, and `u64::MAX` elapsed must not wrap. (❌ Anti-pattern: `f32` timing or a bare cast, ✅ Required: bounded `i32` arithmetic and saturating clamps) [Ref: skylights-core/src/window.rs]
+- [ ] **MQTT contract**: Topics, payload field order, `Index` 1–3, `Percentage` 0–100 and integer-only parsing remain unchanged unless the README schema changes in the same commit. (❌ Anti-pattern: accepting a float or a new topic silently, ✅ Required: parse/format tests plus README) [Ref: skylights-core/src/mqtt.rs]
+- [ ] **GPIO boot safety**: All nine active-low outputs are configured HIGH before slow init, and `probe_gpio_safe` still gates the trial image. (❌ Anti-pattern: leaving a pin floating or defaulting low, ✅ Required: immediate `Level::High` plus probe) [Ref: skylights-app/src/main.rs]
+- [ ] **OTA verify-then-commit**: Hash the complete image before writing `otadata`; stream flash in 4 KiB sector-aligned writes; never mark a trial image valid before the 30 s self-test. (❌ Anti-pattern: commit on first byte or unaligned writes, ✅ Required: SHA-256 gate then trial entry) [Ref: skylights-app/src/ota/mod.rs]
+- [ ] **Release version**: OTA triggers only when the published `VERSION` differs; bump it in its own commit before deploying, then verify `skylight/state`'s `version`. (❌ Anti-pattern: `./deploy.sh` on the current version and assuming it updated, ✅ Required: bump → dry-run → deploy → state check) [Ref: deploy.sh]
+- [ ] **MQTT reconnect backoff**: Pace every reconnect with `ReconnectBackoff`; reset only on success. (❌ Anti-pattern: fixed `RETRY_DELAY`, ✅ Required: `backoff.next_delay_ms()`) [Ref: .agents/results/bugs/bug-20260923-mqtt-reconnect-backoff.md]
+- [ ] **No credential leakage**: Never log or commit `secrets.rs` values; OTA Basic auth is refused over plain HTTP by design. (❌ Anti-pattern: printing SSID/password, ✅ Required: log event names and stable `code=` values) [Ref: docs/SECURITY.md]

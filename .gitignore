@@ -2,3 +2,5 @@
 /target
 skylights-app/src/secrets.rs
 /.env.deploy
+# Local design/work plans (see docs/PLANS.md)
+docs/plans/

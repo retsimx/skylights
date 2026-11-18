@@ -86,7 +86,7 @@ All actuation timing constants live in `skylights-core/src/window.rs` and are ex
   | Opening mid-travel (start `> 0%`) | `677.3 * ΔV - 1374` ms |
   | Closing mid-travel (any start) | `660.5 * ΔV - 1262` ms |
 
-  Arithmetic stays in integer tenths with a single final `/ 10`; the fits' residuals are 0.22–0.24% of the 14.0° stroke. The fits are calibrated on 0.71–7.10 s partial-move samples and 71 s full strokes (the mid-travel lines are anchored at 3.55–7.10 s); boundary commands re-zero, so error does not accumulate across a boundary.
+  Arithmetic stays in integer tenths with a single final `/ 10`; the fits' residuals are 0.22–0.24% of the 14.0° stroke. The fits are calibrated on 0.71–7.10 s partial-move samples and 71 s full strokes (the mid-travel lines are anchored at 3.55–7.10 s); boundary commands re-zero, so error does not accumulate across a boundary. Mid-travel steps above ~25% are an extrapolation; a five-move hardware acceptance run is the remaining gate.
 - **Intermediate Targets (`1..=99`)**:
   - If `target == current_position`, the request is a no-op.
   - Otherwise, the controller pulses `Open` or `Close`, waits the calibrated `travel_ms`, and emits a trailing **`Stop`** pulse (`stop_after = true`) upon arrival.
@@ -131,7 +131,7 @@ Field order is normative (`StateMessage` in `skylights-core/src/mqtt.rs`):
     {"index": 2, "percentage": 50, "moving": false},
     {"index": 3, "percentage": 100, "moving": true}
   ],
-  "version": 8,
+  "version": 9,
   "wifi_rssi": 0,
   "uptime_secs": 120
 }
@@ -219,6 +219,24 @@ git add VERSION && git commit -m "release: VERSION 9"
 `--dry-run` performs the build, extraction, and SHA-256 hashing locally (so the printed digest is real) and prints the remote plan, but performs **no** `ssh`, `scp`, or `mosquitto_pub` — there are no network side effects. It is the recommended pre-flight check.
 
 The image is produced with `espflash save-image --chip esp32 --ignore-app-descriptor`, which writes an ESP-IDF app image (with the required `0xE9` image header while intentionally omitting an ESP-IDF app-descriptor section). A raw `rust-objcopy -O binary` dump would omit that header and be rejected by the ESP32 OTA validator.
+
+#### Release sequence & post-update verification
+
+OTA triggers only when the published version differs from the running build, so a release is a separate step from merging code:
+
+1. Merge the firmware change; CI (host tests + xtensa build/clippy) must be green.
+2. Bump `VERSION` in its own commit/PR.
+3. `./deploy.sh --dry-run` — builds, extracts, checks the slot budget and prints the real SHA-256, with no network side effects.
+4. `./deploy.sh` — publishes `<version>.bin`, its checksum and `version`, prunes older pairs, then publishes `skylight/reset`.
+5. Verify from `skylight/state` (it carries `version`; `skylight/get` does not):
+
+```sh
+set -a; . ./.env.deploy; set +a
+mosquitto_sub -h "$DEPLOY_MQTT_BROKER" -p "${DEPLOY_MQTT_PORT:-1883}" \
+  -t skylight/state -C 1 -W 70
+```
+
+Expect `"version": <new>`, `"moving": false`, and all windows at `0%` after boot homing. An uptime beyond the 30 s trial window means the self-test confirmed the image; an old `version` means the trial failed and the bootloader rolled back.
 
 #### Configuration
 
